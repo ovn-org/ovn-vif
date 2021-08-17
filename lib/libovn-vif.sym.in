@@ -1,0 +1,4 @@
+libovn-vif_@LT_CURRENT@ {
+global:
+        *;
+};

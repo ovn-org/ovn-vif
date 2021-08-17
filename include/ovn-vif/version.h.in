@@ -1,0 +1,11 @@
+#ifndef OVN_VIF_VERSION_H
+#define OVN_VIF_VERSION_H 1
+
+#define OVN_VIF_PACKAGE_STRING  "@PACKAGE_STRING@"
+#define OVN_VIF_PACKAGE_VERSION "@PACKAGE_VERSION@"
+
+#define OVN_VIF_LIB_VERSION     @LT_CURRENT@
+#define OVN_VIF_LIB_REVISION    @LT_REVISION@
+#define OVN_VIF_LIB_AGE         @LT_AGE@
+
+#endif /* ovn-vif/version.h */
