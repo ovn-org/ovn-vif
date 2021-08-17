@@ -353,7 +353,7 @@ AC_DEFUN([OVN_VIF_CHECK_OVN], [
     with_ovn_source="$srcdir/ovn"
   fi
   OVNDIR=$(cd "$(eval echo "$with_ovn_source")"; pwd)
-  if test ! -f "$OVNDIR/lib/plug.c"; then
+  if test ! -f "$OVNDIR/lib/plug-provider.c"; then
     AC_ERROR([$OVNDIR is not an OVN source directory])
   fi
 
@@ -394,4 +394,21 @@ AC_DEFUN([OVS_CHECK_LINUX_NETLINK], [
     ])],
     [AC_DEFINE([HAVE_NLA_BITFIELD32], [1],
     [Define to 1 if struct nla_bitfield32 is available.])])
+])
+
+dnl OVN_VIF_ENABLE_PLUG_REPRESENTOR
+dnl
+dnl Enable the representor plug provider
+AC_DEFUN([OVN_VIF_ENABLE_PLUG_REPRESENTOR], [
+    AC_ARG_ENABLE(
+      [plug-representor],
+      [AC_HELP_STRING([--enable-plug-representor],
+                      [Enable the representor plug provider])],
+      [], [enable_plug_representor=no])
+    AM_CONDITIONAL([ENABLE_PLUG_REPRESENTOR],
+                   [test "$enable_plug_representor" != no])
+    if test "$enable_plug" != no; then
+      AC_DEFINE([ENABLE_PLUG_REPRESENTOR], [1],
+                [Build the representor plug provider])
+    fi
 ])

@@ -5,4 +5,10 @@ lib_libovn_vif_la_LDFLAGS = \
         $(AM_LDFLAGS)
 lib_libovn_vif_la_SOURCES = \
 	lib/netlink-devlink.h \
-	lib/netlink-devlink.c
+	lib/netlink-devlink.c \
+	lib/ovn-vif.c
+
+if ENABLE_PLUG_REPRESENTOR
+lib_libovn_vif_la_SOURCES += \
+	lib/plug_providers/representor/plug-representor.c
+endif
