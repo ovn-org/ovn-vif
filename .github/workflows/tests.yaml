@@ -1,0 +1,107 @@
+name: Build and Test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-linux:
+    env:
+      dependencies: |
+        automake libtool gcc bc libssl-dev llvm-dev libelf-dev \
+        libnuma-dev libpcap-dev ncat libunbound-dev libunwind-dev
+      CC:        ${{ matrix.compiler }}
+      TESTSUITE: ${{ matrix.testsuite }}
+      ASAN:      ${{ matrix.asan }}
+
+    name: linux ${{ join(matrix.*, ' ') }}
+    runs-on: ubuntu-20.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+
+          - compiler: clang
+
+          - compiler: clang
+            testsuite: test
+            asan: asan
+
+    steps:
+    - name: checkout self
+      uses: actions/checkout@v2
+
+    - name: checkout OVS
+      uses: actions/checkout@v2
+      with:
+        repository: 'openvswitch/ovs'
+        path: 'ovs'
+        ref: 'master'
+
+    - name: checkout OVN
+      uses: actions/checkout@v2
+      with:
+        # repository: 'ovn-org/ovn'
+        repository: 'fnordahl/ovn'
+        path: 'ovn'
+        ref: 'pluggingv7'
+
+    - name: dependencies
+      run: |
+        set -euxo pipefail
+        sudo apt update
+        sudo apt remove -y netcat-openbsd
+        sudo apt -y install ${{ env.dependencies }}
+
+    - name: build OVS
+      run: |
+        set -euxo pipefail
+        pushd ovs
+        ./boot.sh && ./configure || { cat config.log; exit 1; }
+        make -j4 || { cat config.log; exit 1; }
+        popd
+
+    - name: configure OVN
+      run: |
+        set -euxo pipefail
+        pushd ovn
+        ./boot.sh && ./configure --with-ovs-source=../ovs \
+            || { cat config.log; exit 1; }
+        popd
+
+    - name: build ovn-vif
+      run: |
+        set -euxo pipefail
+        ./boot.sh && ./configure \
+            --with-ovs-source=./ovs \
+            --with-ovn-source=./ovn \
+            --enable-plug-representor \
+            || { cat config.log; exit 1; }
+        make -j4 || { cat config.log; exit 1; }
+
+    - name: re-configure and build OVN
+      run: |
+        set -euxo pipefail
+        pushd ovn
+        ./boot.sh && ./configure \
+            --with-ovs-source=$(realpath ../ovs) \
+            --with-plug-provider=$(realpath ../) \
+            || { cat config.log; exit 1; }
+        make -j4 || { cat config.log; exit 1; }
+        popd
+
+    - name: testsuite - test
+      if: matrix.testsuite == 'test'
+      run: |
+        set -euxo pipefail
+        pushd ovn
+        if [ "$ASAN" ]; then
+          export CFLAGS="-fno-omit-frame-pointer -fno-common"
+          export OVN_CFLAGS="-fsanitize=address"
+        fi
+        export DISTCHECK_CONFIGURE_FLAGS="--with-ovs-source=$(realpath ../ovs) --with-plug-provider=$(realpath ../)"
+        make distcheck -j4 TESTSUITEFLAGS="-j4" RECHECK=yes \
+            || { cat */_build/sub/tests/testsuite.log ; exit 1; }
+        popd

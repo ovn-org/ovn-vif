@@ -76,7 +76,8 @@ EXTRA_DIST = \
 	LICENSE \
 	MAINTAINERS.rst \
 	README.rst \
-	boot.sh
+	boot.sh \
+	.github/workflows/tests.yaml
 bin_PROGRAMS =
 sbin_PROGRAMS =
 bin_SCRIPTS =
