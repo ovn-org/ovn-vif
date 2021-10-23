@@ -192,6 +192,7 @@ dist-hook-git: distfiles
 	    grep -v '\.gitattributes$$' | \
 	    grep -v '\.gitmodules$$' | \
 	    grep -v "$(submodules)" | \
+	    grep -v "^Documentation/conf.py$$" | \
 	    LC_ALL=C sort -u > all-gitfiles; \
 	  LC_ALL=C comm -1 -3 distfiles all-gitfiles > missing-distfiles; \
 	  if test -s missing-distfiles; then \
@@ -362,6 +363,7 @@ dist-docs:
 
 
 include automake.mk
+include Documentation/automake.mk
 include m4/automake.mk
 include lib/automake.mk
 include tests/automake.mk

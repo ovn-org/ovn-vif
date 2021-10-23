@@ -220,3 +220,15 @@ AC_DEFUN([OVS_CHECK_CXX],
      enable_cxx=false
    fi
    AM_CONDITIONAL([HAVE_CXX], [$enable_cxx])])
+
+dnl Checks for sphinx.
+AC_DEFUN([OVN_CHECK_SPHINX],
+  [AC_CACHE_CHECK(
+    [for sphinx],
+    [ovs_cv_sphinx],
+    [if type sphinx-build >/dev/null 2>&1; then
+       ovs_cv_sphinx=yes
+     else
+       ovs_cv_sphinx=no
+     fi])
+   AM_CONDITIONAL([HAVE_SPHINX], [test "$ovs_cv_sphinx" = yes])])

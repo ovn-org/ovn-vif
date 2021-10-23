@@ -65,3 +65,5 @@ testsuite.tmp.orig
 /openvswitch*.tar.gz
 /.venv
 /cxx-check
+/Documentation/_build
+docs-check
