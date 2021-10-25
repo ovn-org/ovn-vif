@@ -25,6 +25,7 @@
 #include "openvswitch/hmap.h"
 #include "openvswitch/vlog.h"
 #include "netlink.h"
+#include "netlink-socket.h"
 #include "netlink-devlink.h"
 #include "packets.h"
 #include "random.h"
@@ -362,6 +363,8 @@ port_table_delete_entry(struct port_table *tbl,
     }
 }
 
+static struct nl_sock *devlink_monitor_sock;
+
 static bool compat_get_host_pf_mac(const char *, struct eth_addr *);
 
 static void
@@ -426,8 +429,6 @@ port_table_update_devlink_port(struct dl_port *port_entry)
         fallback_mac : port_entry->function.eth_addr);
 }
 
-static void port_table_delete_devlink_port(
-    struct dl_port *port_entry) OVS_UNUSED;
 static void
 port_table_delete_devlink_port(struct dl_port *port_entry)
 {
@@ -463,9 +464,103 @@ devlink_port_dump(void)
 }
 
 static int
+devlink_monitor_init(void)
+{
+    unsigned int devlink_mcgroup;
+    int error;
+
+    error = nl_lookup_genl_mcgroup(DEVLINK_GENL_NAME,
+                                   DEVLINK_GENL_MCGRP_CONFIG_NAME,
+                                   &devlink_mcgroup);
+    if (error) {
+        return error;
+    }
+
+    error = nl_sock_create(NETLINK_GENERIC, &devlink_monitor_sock);
+    if (error) {
+        return error;
+    }
+
+    error = nl_sock_join_mcgroup(devlink_monitor_sock, devlink_mcgroup);
+    if (error) {
+        return error;
+    }
+
+    return 0;
+}
+
+static bool
+devlink_monitor_run(void)
+{
+    uint64_t buf_stub[4096 / 64];
+    struct ofpbuf buf;
+    int error;
+    bool changed = false;
+
+    ofpbuf_use_stub(&buf, buf_stub, sizeof buf_stub);
+    for (;;) {
+        error = nl_sock_recv(devlink_monitor_sock, &buf, NULL, false);
+        if (error == EAGAIN) {
+            /* Nothing to do. */
+            break;
+        } else if (error == ENOBUFS) {
+            VLOG_WARN("devlink monitor socket overflowed: %s",
+                      ovs_strerror(error));
+        } else if (error) {
+            VLOG_ERR("error on devlink monitor socket: %s",
+                     ovs_strerror(error));
+            break;
+        } else {
+            struct genlmsghdr *genl;
+            struct dl_port port_entry;
+
+            genl = nl_msg_genlmsghdr(&buf);
+            if (genl->cmd == DEVLINK_CMD_PORT_NEW
+                    || genl->cmd == DEVLINK_CMD_PORT_DEL) {
+                if (!nl_dl_parse_port_policy(&buf, &port_entry)) {
+                    VLOG_WARN("could not parse devlink port entry");
+                    continue;
+                }
+                if (genl->cmd == DEVLINK_CMD_PORT_NEW) {
+                    if (port_entry.netdev_ifindex == UINT32_MAX) {
+                        /* When ports are removed we receive both a NEW CMD
+                         * without data, followed by a DEL CMD. Ignore the
+                         * empty NEW CMD */
+                        continue;
+                    }
+                    changed = true;
+                    port_table_update_devlink_port(&port_entry);
+                } else if (genl->cmd == DEVLINK_CMD_PORT_DEL) {
+                    port_table_delete_devlink_port(&port_entry);
+                }
+            }
+        }
+    }
+    return changed;
+}
+
+static int
 vif_plug_representor_init(void)
 {
-    return devlink_port_dump();
+    int error;
+
+    error = devlink_monitor_init();
+    if (error) {
+        return error;
+    }
+
+    error = devlink_port_dump();
+    if (error) {
+        return error;
+    }
+
+    return 0;
+}
+
+static bool
+vif_plug_representor_run(struct vif_plug_class *plug_class OVS_UNUSED)
+{
+    return devlink_monitor_run();
 }
 
 static int
@@ -490,6 +585,9 @@ vif_plug_representor_port_prepare(const struct vif_plug_port_ctx_in *ctx_in,
     if (!opt_pf_mac || !opt_vf_num) {
          return false;
     }
+
+    /* Ensure lookup tables are up to date */
+    vif_plug_representor_run(NULL);
 
     struct eth_addr pf_mac;
     if (!eth_addr_from_string(opt_pf_mac, &pf_mac)) {
@@ -544,7 +642,7 @@ const struct vif_plug_class vif_plug_representor = {
     .init = vif_plug_representor_init,
     .destroy = vif_plug_representor_destroy,
     .vif_plug_get_maintained_iface_options = NULL, /* TODO */
-    .run = NULL, /* TODO */
+    .run = vif_plug_representor_run,
     .vif_plug_port_prepare = vif_plug_representor_port_prepare,
     .vif_plug_port_finish = vif_plug_representor_port_finish,
     .vif_plug_port_ctx_destroy = vif_plug_representor_port_ctx_destroy,
