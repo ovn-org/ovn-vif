@@ -438,7 +438,7 @@ port_table_delete_devlink_port(struct dl_port *port_entry)
 }
 
 static int
-vif_plug_representor_init(void)
+devlink_port_dump(void)
 {
     struct nl_dl_dump_state *port_dump;
     struct dl_port port_entry;
@@ -460,6 +460,12 @@ vif_plug_representor_init(void)
     nl_dl_dump_destroy(port_dump);
 
     return 0;
+}
+
+static int
+vif_plug_representor_init(void)
+{
+    return devlink_port_dump();
 }
 
 static int
