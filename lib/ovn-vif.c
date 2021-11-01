@@ -1,10 +1,10 @@
 #include <config.h>
 
-#include "plug-provider.h"
+#include "vif-plug-provider.h"
 
-extern const struct plug_class plug_representor;
+extern const struct vif_plug_class vif_plug_representor;
 
-const struct plug_class *plug_provider_classes[] = {
-    &plug_representor,
+const struct vif_plug_class *vif_plug_provider_classes[] = {
+    &vif_plug_representor,
     NULL,
 };

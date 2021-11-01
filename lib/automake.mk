@@ -10,5 +10,5 @@ lib_libovn_vif_la_SOURCES = \
 
 if ENABLE_PLUG_REPRESENTOR
 lib_libovn_vif_la_SOURCES += \
-	lib/plug_providers/representor/plug-representor.c
+	lib/vif-plug-providers/representor/vif-plug-representor.c
 endif

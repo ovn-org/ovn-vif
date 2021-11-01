@@ -46,7 +46,7 @@ jobs:
         # repository: 'ovn-org/ovn'
         repository: 'fnordahl/ovn'
         path: 'ovn'
-        ref: 'pluggingv7'
+        ref: 'pluggingv8'
 
     - name: dependencies
       run: |

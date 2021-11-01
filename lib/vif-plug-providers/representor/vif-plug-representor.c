@@ -19,7 +19,7 @@
 #include <linux/devlink.h>
 #include <net/if.h>
 
-#include "plug-provider.h"
+#include "vif-plug-provider.h"
 
 #include "hash.h"
 #include "openvswitch/hmap.h"
@@ -29,7 +29,7 @@
 #include "openvswitch/shash.h"
 #include "packets.h"
 
-VLOG_DEFINE_THIS_MODULE(plug_representor);
+VLOG_DEFINE_THIS_MODULE(vif_plug_representor);
 
 /* Contains netdev name of ports known to devlink indexed by PF MAC
  * address and logical function number (if applicable).
@@ -110,7 +110,7 @@ devlink_port_add_function(struct dl_port *port_entry,
 
 
 static int
-plug_representor_init(void)
+vif_plug_representor_init(void)
 {
     struct nl_dl_dump_state *port_dump;
     struct dl_port port_entry;
@@ -198,7 +198,7 @@ plug_representor_init(void)
 }
 
 static int
-plug_representor_destroy(void)
+vif_plug_representor_destroy(void)
 {
     shash_destroy_free_data(&devlink_ports);
 
@@ -206,17 +206,17 @@ plug_representor_destroy(void)
 }
 
 static bool
-plug_representor_port_prepare(const struct plug_port_ctx_in *ctx_in,
-                              struct plug_port_ctx_out *ctx_out)
+vif_plug_representor_port_prepare(const struct vif_plug_port_ctx_in *ctx_in,
+                                 struct vif_plug_port_ctx_out *ctx_out)
 {
     if (ctx_in->op_type == PLUG_OP_REMOVE) {
         return true;
     }
     char keybuf[MAX_KEY_LEN];
     const char *pf_mac = smap_get(&ctx_in->lport_options,
-                                  "plug:representor:pf-mac");
+                                  "vif-plug:representor:pf-mac");
     const char *vf_num = smap_get(&ctx_in->lport_options,
-                                  "plug:representor:vf-num");
+                                  "vif-plug:representor:vf-num");
     if (!pf_mac || !vf_num) {
         return false;
     }
@@ -224,7 +224,7 @@ plug_representor_port_prepare(const struct plug_port_ctx_in *ctx_in,
                                           pf_mac, vf_num))
     {
         /* Overflow, most likely incorrect input data from database */
-        VLOG_WARN("Southbound DB port plugging options out of range for "
+        VLOG_WARN("Southbound DB VIF port plugging options out of range for "
                   "lport: %s pf-mac: '%s' vf-num: '%s'",
                   ctx_in->lport_name, pf_mac, vf_num);
         return false;
@@ -246,29 +246,30 @@ plug_representor_port_prepare(const struct plug_port_ctx_in *ctx_in,
 }
 
 static void
-plug_representor_port_finish(const struct plug_port_ctx_in *ctx_in OVS_UNUSED,
-                             struct plug_port_ctx_out *ctx_out OVS_UNUSED)
+vif_plug_representor_port_finish(
+        const struct vif_plug_port_ctx_in *ctx_in OVS_UNUSED,
+        struct vif_plug_port_ctx_out *ctx_out OVS_UNUSED)
 {
     /* Nothing to be done here for now */
 }
 
 static void
-plug_representor_port_ctx_destroy(
-                const struct plug_port_ctx_in *ctx_in OVS_UNUSED,
-                struct plug_port_ctx_out *ctx_out OVS_UNUSED)
+vif_plug_representor_port_ctx_destroy(
+        const struct vif_plug_port_ctx_in *ctx_in OVS_UNUSED,
+        struct vif_plug_port_ctx_out *ctx_out OVS_UNUSED)
 {
     /* Noting to be done here for now */
 }
 
-const struct plug_class plug_representor = {
+const struct vif_plug_class vif_plug_representor = {
     .type = "representor",
-    .init = plug_representor_init,
-    .destroy = plug_representor_destroy,
-    .plug_get_maintained_iface_options = NULL, /* TODO */
+    .init = vif_plug_representor_init,
+    .destroy = vif_plug_representor_destroy,
+    .vif_plug_get_maintained_iface_options = NULL, /* TODO */
     .run = NULL, /* TODO */
-    .plug_port_prepare = plug_representor_port_prepare,
-    .plug_port_finish = plug_representor_port_finish,
-    .plug_port_ctx_destroy = plug_representor_port_ctx_destroy,
+    .vif_plug_port_prepare = vif_plug_representor_port_prepare,
+    .vif_plug_port_finish = vif_plug_representor_port_finish,
+    .vif_plug_port_ctx_destroy = vif_plug_representor_port_ctx_destroy,
 };
 
 /* The kernel devlink-port interface provides a vendor neutral and standard way
