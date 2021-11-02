@@ -87,7 +87,7 @@ jobs:
         pushd ovn
         ./boot.sh && ./configure \
             --with-ovs-source=$(realpath ../ovs) \
-            --with-plug-provider=$(realpath ../) \
+            --with-vif-plug-provider=$(realpath ../) \
             || { cat config.log; exit 1; }
         make -j4 || { cat config.log; exit 1; }
         popd
