@@ -43,10 +43,9 @@ jobs:
     - name: checkout OVN
       uses: actions/checkout@v2
       with:
-        # repository: 'ovn-org/ovn'
-        repository: 'fnordahl/ovn'
+        repository: 'ovn-org/ovn'
         path: 'ovn'
-        ref: 'pluggingv8'
+        ref: 'main'
 
     - name: dependencies
       run: |
