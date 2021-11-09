@@ -33,4 +33,4 @@ OVN VIF
 .. toctree::
    :maxdepth: 2
 
-   plug_providers/index
+   vif-plug-providers/index

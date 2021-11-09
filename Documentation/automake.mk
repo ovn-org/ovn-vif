@@ -2,8 +2,8 @@ DOC_SOURCE = \
 	Documentation/_static/logo.png \
 	Documentation/index.rst \
 	Documentation/topics/index.rst \
-	Documentation/topics/plug_providers/index.rst \
-	Documentation/topics/plug_providers/plug-representor.rst
+	Documentation/topics/vif-plug-providers/index.rst \
+	Documentation/topics/vif-plug-providers/vif-plug-representor.rst
 
 EXTRA_DIST += $(DOC_SOURCE)
 

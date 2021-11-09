@@ -21,12 +21,25 @@
 
       Avoid deeper levels because they do not render well.
 
-==============
-Plug Providers
-==============
+=================================
+The Representor VIF Plug Provider
+=================================
 
+Logical Switch Port Options
+---------------------------
 
-.. toctree::
-   :maxdepth: 2
+vif-plug:representor:pf-mac
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-   plug-representor
+MAC address for identifying PF device.  When
+`OVN_Northbound:Logical_Switch_Port:options` key `vif-plug:representor:vf-num`
+is also set, this option is used to identify PF to use as base to locate the
+correct VF representor port.  When `OVN_Northbound:Logical_Switch_Port:options`
+key `vif-plug:representor:vf-num` is not set this option is used to locate a PF
+representor port.
+
+vif-plug:representor:vf-num
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Logical VF number relative to PF device specified in
+`OVN_Northbound:Logical_Switch_Port:options` key `vif-plug-pf-mac`.

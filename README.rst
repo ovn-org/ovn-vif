@@ -30,16 +30,16 @@ OVN VIF
 What is OVN VIF?
 ----------------
 
-The OVN VIF repository contains OVN plug provider implementations.
+The OVN VIF repository contains OVN VIF plug provider implementations.
 
-For more information, please refer to the `OVN Plug Providers`_ page which is
-part of the `OVN Deep Dive`_ section of the `OVN Documentation`_.
+For more information, please refer to the `OVN VIF Plug Providers`_ page which
+is part of the `OVN Deep Dive`_ section of the `OVN Documentation`_.
 
 What's here?
 ------------
 
-Have a look at each individual `plug provider implementation documentation
-<Documentation/topics/plug_providers>`__ for details on usage and available
+Have a look at each individual `VIF plug provider implementation documentation
+<Documentation/topics/vif-plug-providers>`__ for details on usage and available
 options.
 
 License
@@ -53,7 +53,7 @@ Contact
 bugs@openvswitch.org
 
 .. LINKS
-.. _OVN Plug Providers:
-   https://docs.ovn.org/en/latest/topics/plug_providers/plug-providers.html
+.. _OVN VIF Plug Providers:
+   https://docs.ovn.org/en/latest/topics/vif-plug-providers/vif-plug-providers.html
 .. _OVN Deep Dive: https://docs.ovn.org/en/latest/topics/index.html
 .. _OVN Documentation: https://docs.ovn.org/en/latest/index.html
