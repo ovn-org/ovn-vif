@@ -6,7 +6,8 @@ EXTRA_DIST += \
         $(srcdir)/tests/testsuite
 
 TESTSUITE_AT = \
-	tests/testsuite.at
+	tests/testsuite.at \
+	tests/vif-plug-providers.at
 
 TESTSUITE = $(srcdir)/tests/testsuite
 TESTSUITE_DIR = $(abs_top_builddir)/tests/testsuite.dir
@@ -42,11 +43,14 @@ $(srcdir)/package.m4: $(top_srcdir)/configure.ac
 noinst_PROGRAMS += tests/ovstest
 tests_ovstest_SOURCES = \
         tests/ovstest.h \
-	tests/ovstest.c
+	tests/ovstest.c \
+	lib/vif-plug-providers/representor/vif-plug-representor.c
 tests_ovstest_LDADD = \
 	$(OVS_LIBDIR)/libopenvswitch.la \
         lib/netlink-devlink.$(OBJEXT)
 tests_ovstest_CPPFLAGS = $(AM_CPPFLAGS)
 tests_ovstest_CPPFLAGS += \
 	-DOVSTEST \
-	-I$(OVS_LIBDIR)
+	-I$(OVS_LIBDIR) \
+	-Ilib/vif-plug-providers/representor
+

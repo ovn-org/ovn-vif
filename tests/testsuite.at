@@ -15,3 +15,5 @@ See the License for the specific language governing permissions and
 limitations under the License.])
 
 m4_ifdef([AT_COLOR_TESTS], [AT_COLOR_TESTS])
+
+m4_include([tests/vif-plug-providers.at])
