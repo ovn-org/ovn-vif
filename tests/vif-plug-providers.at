@@ -1,0 +1,6 @@
+AT_BANNER([vif-plug-providers unit tests])
+
+AT_SETUP([representor data store])
+AT_CHECK([ovstest test-vif-plug-representor phy-store], [0], [])
+AT_CHECK([ovstest test-vif-plug-representor port-store], [0], [])
+AT_CLEANUP
