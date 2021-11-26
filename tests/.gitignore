@@ -1,2 +1,7 @@
 /atconfig
 /atlocal
+/ovstest
+/testsuite
+/testsuite.dir
+/testsuite.log
+/testsuite.tmp.orig

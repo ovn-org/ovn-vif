@@ -8,6 +8,8 @@ lib_libovn_vif_la_SOURCES = \
 	lib/netlink-devlink.c \
 	lib/ovn-vif.c
 
+DISTCLEANFILES += lib/.deps/netlink-devlink.Po
+
 if ENABLE_PLUG_REPRESENTOR
 lib_libovn_vif_la_SOURCES += \
 	lib/vif-plug-providers/representor/vif-plug-representor.c
