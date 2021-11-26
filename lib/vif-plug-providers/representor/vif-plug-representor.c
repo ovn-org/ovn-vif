@@ -32,18 +32,6 @@
 
 VLOG_DEFINE_THIS_MODULE(vif_plug_representor);
 
-/* Contains netdev name of ports known to devlink indexed by PF MAC
- * address and logical function number (if applicable).
- *
- * Examples:
- *     SR-IOV Physical Function: key "00:53:00:00:00:42"    value "pf0hpf"
- *     SR-IOV Virtual Function:  key "00:53:00:00:00:42-42" value "pf0vf42"
- */
-static struct shash devlink_ports;
-
-/* Max number of physical ports connected to a single NIC SoC. */
-#define MAX_NIC_PHY_PORTS 64
-
 struct port_node {
     struct hmap_node mac_vf_node;
     struct hmap_node ifindex_node;
@@ -94,7 +82,7 @@ struct port_table {
                                 * of PFs */
 };
 
-static struct port_table *port_table OVS_UNUSED;
+static struct port_table *port_table;
 
 static struct port_node *
 port_node_create(uint32_t netdev_ifindex, const char *netdev_name,
@@ -132,7 +120,6 @@ port_node_update(struct port_node *pn, const char *netdev_name)
     pn->netdev_name = xstrdup(netdev_name);
 }
 
-static struct port_table * port_table_create(void) OVS_UNUSED;
 static struct port_table *
 port_table_create(void)
 {
@@ -147,7 +134,6 @@ port_table_create(void)
     return tbl;
 }
 
-static void port_table_destroy(struct port_table *tbl) OVS_UNUSED;
 static void
 port_table_destroy(struct port_table *tbl)
 {
@@ -192,8 +178,6 @@ port_table_lookup_ifindex(struct port_table *tbl, uint32_t netdev_ifindex)
     return NULL;
 }
 
-static struct port_node *port_table_lookup_pf_mac_vf(
-    struct port_table *tbl, struct eth_addr mac, uint16_t vf_num) OVS_UNUSED;
 static struct port_node *
 port_table_lookup_pf_mac_vf(struct port_table *tbl, struct eth_addr mac,
                             uint16_t vf_num)
@@ -286,13 +270,6 @@ port_table_update_function__(struct port_table *tbl, struct port_node *pf,
 }
 
 /* Inserts or updates an entry in the table. */
-static struct port_node * port_table_update_entry(
-    struct port_table *tbl,
-    const char *bus_name, const char *dev_name,
-    uint32_t netdev_ifindex, const char *netdev_name,
-    uint32_t number, uint16_t pci_pf_number,
-    uint16_t pci_vf_number, uint16_t flavour,
-    struct eth_addr mac) OVS_UNUSED;
 static struct port_node *
 port_table_update_entry(struct port_table *tbl,
                         const char *bus_name, const char *dev_name,
@@ -357,11 +334,6 @@ port_table_delete_function__(struct port_table *tbl, struct port_node *pf,
     port_node_destroy(pn);
 }
 
-static void port_table_delete_entry(
-    struct port_table *tbl,
-    const char *bus_name, const char *dev_name,
-    uint32_t number, uint16_t pci_pf_number,
-    uint16_t pci_vf_number, uint16_t flavour) OVS_UNUSED;
 static void
 port_table_delete_entry(struct port_table *tbl,
                         const char *bus_name, const char *dev_name,
@@ -390,54 +362,16 @@ port_table_delete_entry(struct port_table *tbl,
     }
 }
 
-/* string repr of eth MAC, '-', logical function number (uint32_t) */
-#define MAX_KEY_LEN 17+1+10+1
-
 static bool compat_get_host_pf_mac(const char *, struct eth_addr *);
 
-static bool
-fill_devlink_ports_key_from_strs(char *buf, size_t bufsiz,
-                                const char *host_pf_mac,
-                                const char *function)
-{
-    return snprintf(buf, bufsiz,
-                    function != NULL ? "%s-%s": "%s",
-                    host_pf_mac, function) < bufsiz;
-}
-
-/* We deliberately pass the struct eth_addr by value as we would have to copy
- * the data either way to make use of the ETH_ADDR_ARGS macro */
-static bool
-fill_devlink_ports_key_from_typed(char *buf, size_t bufsiz,
-                    struct eth_addr host_pf_mac,
-                    uint32_t function)
-{
-    return snprintf(
-        buf, bufsiz,
-        function < UINT32_MAX ? ETH_ADDR_FMT"-%"PRIu32 : ETH_ADDR_FMT,
-        ETH_ADDR_ARGS(host_pf_mac), function) < bufsiz;
-}
-
 static void
-devlink_port_add_function(struct dl_port *port_entry,
-                          struct eth_addr *host_pf_mac)
+port_table_update_devlink_port(struct dl_port *port_entry)
 {
-    char keybuf[MAX_KEY_LEN];
-    uint32_t function_number;
-
-    switch (port_entry->flavour) {
-    case DEVLINK_PORT_FLAVOUR_PCI_PF:
-        /* for Physical Function representor ports we only add the MAC address
-         * and no logical function number */
-        function_number = -1;
-        break;
-    case DEVLINK_PORT_FLAVOUR_PCI_VF:
-        function_number = port_entry->pci_vf_number;
-        break;
-    default:
+    if (port_entry->flavour != DEVLINK_PORT_FLAVOUR_PHYSICAL
+            && port_entry->flavour != DEVLINK_PORT_FLAVOUR_PCI_PF
+            && port_entry->flavour != DEVLINK_PORT_FLAVOUR_PCI_VF) {
         VLOG_WARN("Unsupported flavour for port '%s': %s",
             port_entry->netdev_name,
-            port_entry->flavour == DEVLINK_PORT_FLAVOUR_PHYSICAL ? "PHYSICAL" :
             port_entry->flavour == DEVLINK_PORT_FLAVOUR_CPU ? "CPU" :
             port_entry->flavour == DEVLINK_PORT_FLAVOUR_DSA ? "DSA" :
             port_entry->flavour == DEVLINK_PORT_FLAVOUR_PCI_PF ? "PCI_PF":
@@ -448,14 +382,60 @@ devlink_port_add_function(struct dl_port *port_entry,
             "UNKNOWN");
         return;
     };
-    /* Failure to fill key from typed values means calculation of the max key
-     * length is wrong, i.e. a bug. */
-    ovs_assert(fill_devlink_ports_key_from_typed(
-                            keybuf, sizeof(keybuf),
-                            *host_pf_mac, function_number));
-    shash_add(&devlink_ports, keybuf, xstrdup(port_entry->netdev_name));
+
+    struct eth_addr fallback_mac;
+    if (port_entry->flavour == DEVLINK_PORT_FLAVOUR_PCI_PF
+            && eth_addr_is_zero(port_entry->function.eth_addr)) {
+        /* PF representor does not have host facing MAC address set.
+         *
+         * For kernel versions where the devlink-port infrastructure does
+         * not provide MAC address for PCI_PF flavoured ports, there exists
+         * a interim interface in sysfs which is relative to the name of a
+         * PHYSICAL port netdev name.
+         *
+         * Note that there is not really any association between PHYSICAL and
+         * PF representor ports from the devlink data structure point of view.
+         * But we have found them to correlate on the devices where this is
+         * necessary.
+         *
+         * Attempt to retrieve host facing MAC address from the compatibility
+         * interface */
+        struct port_node *phy;
+        phy = port_table_lookup_phy_bus_dev(port_table,
+                                            port_entry->bus_name,
+                                            port_entry->dev_name,
+                                            DEVLINK_PORT_FLAVOUR_PHYSICAL,
+                                            port_entry->pci_pf_number);
+        if (!phy) {
+            VLOG_WARN("Unable to find PHYSICAL representor for fallback "
+                      "lookup of host PF MAC address.");
+            return;
+        }
+        if (!compat_get_host_pf_mac(phy->netdev_name, &fallback_mac)) {
+            VLOG_WARN("Fallback lookup of host PF MAC address failed.");
+            return;
+        }
+    }
+    port_table_update_entry(
+        port_table, port_entry->bus_name, port_entry->dev_name,
+        port_entry->netdev_ifindex, port_entry->netdev_name,
+        port_entry->number, port_entry->pci_pf_number,
+        port_entry->pci_vf_number, port_entry->flavour,
+        port_entry->flavour == DEVLINK_PORT_FLAVOUR_PCI_PF
+            && eth_addr_is_zero(port_entry->function.eth_addr) ?
+        fallback_mac : port_entry->function.eth_addr);
 }
 
+static void port_table_delete_devlink_port(
+    struct dl_port *port_entry) OVS_UNUSED;
+static void
+port_table_delete_devlink_port(struct dl_port *port_entry)
+{
+    port_table_delete_entry(port_table,
+                            port_entry->bus_name, port_entry->dev_name,
+                            port_entry->number, port_entry->pci_pf_number,
+                            port_entry->pci_vf_number, port_entry->flavour);
+}
 
 static int
 vif_plug_representor_init(void)
@@ -463,9 +443,8 @@ vif_plug_representor_init(void)
     struct nl_dl_dump_state *port_dump;
     struct dl_port port_entry;
     int error;
-    struct eth_addr host_pf_macs[MAX_NIC_PHY_PORTS];
 
-    shash_init(&devlink_ports);
+    port_table = port_table_create();
 
     port_dump = nl_dl_dump_init();
     if ((error = nl_dl_dump_init_error(port_dump))) {
@@ -473,71 +452,9 @@ vif_plug_representor_init(void)
             "unable to start dump of ports from devlink-port interface");
         return error;
     }
-    /* The core devlink infrastructure in the kernel keeps a linked list of
-     * the devices and each of those has a linked list of ports. These are
-     * populated by each device driver as devices are enumerated, and as such
-     * we can rely on ports being dumped in a consistent order on a device
-     * by device basis with logical numbering for each port flavour starting
-     * on 0 for each new device.
-     */
     nl_dl_dump_start(DEVLINK_CMD_PORT_GET, port_dump);
     while (nl_dl_port_dump_next(port_dump, &port_entry)) {
-        switch (port_entry.flavour) {
-        case DEVLINK_PORT_FLAVOUR_PHYSICAL:
-            /* The PHYSICAL flavoured port represent a network facing port on
-             * the NIC.
-             *
-             * For kernel versions where the devlink-port infrastructure does
-             * not provide MAC address for PCI_PF flavoured ports, there exist
-             * a interface in sysfs which is relative to the name of the
-             * PHYSICAL port netdev name.
-             *
-             * Since we at this point in the dump do not know if the MAC will
-             * be provided for the PCI_PF or not, proactively store the MAC
-             * address by looking up through the sysfs interface.
-             *
-             * If MAC address is available once we get to the PCI_PF we will
-             * overwrite the stored value.
-             */
-            if (port_entry.number > MAX_NIC_PHY_PORTS) {
-                VLOG_WARN("physical port number out of range for port '%s': "
-                          "%"PRIu32,
-                          port_entry.netdev_name, port_entry.number);
-                continue;
-            }
-            compat_get_host_pf_mac(port_entry.netdev_name,
-                                   &host_pf_macs[port_entry.number]);
-            break;
-        case DEVLINK_PORT_FLAVOUR_PCI_PF: /* FALL THROUGH */
-            /* The PCI_PF flavoured port represent a host facing port.
-             *
-             * For function flavours other than PHYSICAL pci_pf_number will be
-             * set to the logical number of which physical port the function
-             * belongs.
-             */
-            if (!eth_addr_is_zero(port_entry.function.eth_addr)) {
-                host_pf_macs[port_entry.pci_pf_number] =
-                    port_entry.function.eth_addr;
-            }
-            /* FALL THROUGH */
-        case DEVLINK_PORT_FLAVOUR_PCI_VF:
-            /* The PCI_VF flavoured port represent a host facing
-             * PCI Virtual Function.
-             *
-             * For function flavours other than PHYSICAL pci_pf_number will be
-             * set to the logical number of which physical port the function
-             * belongs.
-             */
-            if (port_entry.pci_pf_number > MAX_NIC_PHY_PORTS) {
-                VLOG_WARN("physical port number out of range for port '%s': "
-                          "%"PRIu32,
-                          port_entry.netdev_name, port_entry.pci_pf_number);
-                continue;
-            }
-            devlink_port_add_function(&port_entry,
-                                      &host_pf_macs[port_entry.pci_pf_number]);
-            break;
-        };
+        port_table_update_devlink_port(&port_entry);
     }
     nl_dl_dump_finish(port_dump);
     nl_dl_dump_destroy(port_dump);
@@ -548,7 +465,7 @@ vif_plug_representor_init(void)
 static int
 vif_plug_representor_destroy(void)
 {
-    shash_destroy_free_data(&devlink_ports);
+    port_table_destroy(port_table);
 
     return 0;
 }
@@ -560,34 +477,41 @@ vif_plug_representor_port_prepare(const struct vif_plug_port_ctx_in *ctx_in,
     if (ctx_in->op_type == PLUG_OP_REMOVE) {
         return true;
     }
-    char keybuf[MAX_KEY_LEN];
-    const char *pf_mac = smap_get(&ctx_in->lport_options,
-                                  "vif-plug:representor:pf-mac");
-    const char *vf_num = smap_get(&ctx_in->lport_options,
-                                  "vif-plug:representor:vf-num");
-    if (!pf_mac || !vf_num) {
-        return false;
+    const char *opt_pf_mac = smap_get(&ctx_in->lport_options,
+                                   "vif-plug:representor:pf-mac");
+    const char *opt_vf_num = smap_get(&ctx_in->lport_options,
+                                   "vif-plug:representor:vf-num");
+    if (!opt_pf_mac || !opt_vf_num) {
+         return false;
     }
-    if (!fill_devlink_ports_key_from_strs(keybuf, sizeof(keybuf),
-                                          pf_mac, vf_num))
-    {
-        /* Overflow, most likely incorrect input data from database */
-        VLOG_WARN("Southbound DB VIF port plugging options out of range for "
-                  "lport: %s pf-mac: '%s' vf-num: '%s'",
-                  ctx_in->lport_name, pf_mac, vf_num);
+
+    struct eth_addr pf_mac;
+    if (!eth_addr_from_string(opt_pf_mac, &pf_mac)) {
+        VLOG_WARN("Unable to parse option as Ethernet address for lport: %s "
+                  "pf-mac: '%s' vf-num: '%s'",
+                  ctx_in->lport_name, opt_pf_mac, opt_vf_num);
         return false;
     }
 
-    char *rep_port;
-    rep_port = shash_find_data(&devlink_ports, keybuf);
-    if (!rep_port) {
+    char *cp = NULL;
+    uint16_t vf_num = strtol(opt_vf_num, &cp, 10);
+    if (cp && cp != opt_vf_num && *cp != '\0') {
+        VLOG_WARN("Unable to parse option as VF number for lport: %s "
+                  "pf-mac: '%s' vf-num: '%s'",
+                  ctx_in->lport_name, opt_pf_mac, opt_vf_num);
+    }
+
+    struct port_node *pn;
+    pn = port_table_lookup_pf_mac_vf(port_table, pf_mac, vf_num);
+
+    if (!pn || !pn->netdev_name) {
         VLOG_INFO("No representor port found for "
                   "lport: %s pf-mac: '%s' vf-num: '%s'",
-                  ctx_in->lport_name, pf_mac, vf_num);
+                  ctx_in->lport_name, opt_pf_mac, opt_vf_num);
         return false;
     }
     if (ctx_out) {
-        ctx_out->name = rep_port;
+        ctx_out->name = pn->netdev_name;
         ctx_out->type = NULL;
     }
     return true;
@@ -670,9 +594,10 @@ compat_get_host_pf_mac(const char *netdev_name, struct eth_addr *ea)
 #include "tests/ovstest.h"
 
 static bool
-compat_get_host_pf_mac(const char *netdev_name OVS_UNUSED, struct eth_addr *ea)
+compat_get_host_pf_mac(const char *netdev_name, struct eth_addr *ea)
 {
 
+    ovs_assert(!strcmp(netdev_name, "p0"));
     *ea = (struct eth_addr)ETH_ADDR_C(00,53,00,00,00,51);
     return true;
 }
@@ -814,11 +739,119 @@ test_port_store(struct ovs_cmdl_context *ctx OVS_UNUSED)
 }
 
 static void
+test_port_table_update_devlink_port(struct ovs_cmdl_context *ctx OVS_UNUSED)
+{
+    struct dl_port dl_port = {
+        .bus_name = "pci",
+        .dev_name = "0000:03:00.0",
+        .netdev_ifindex = 1000,
+        .netdev_name = "pf0vf0",
+        .number = UINT32_MAX,
+        .pci_pf_number = 0,
+        .pci_vf_number = 0,
+        .flavour = DEVLINK_PORT_FLAVOUR_PCI_VF,
+    };
+    struct port_node *pn;
+
+    _init_store();
+
+    port_table_update_devlink_port(&dl_port);
+
+    pn = port_table_lookup_ifindex(port_table, 1000);
+    ovs_assert(pn);
+    ovs_assert(pn->pf);
+    ovs_assert(
+        eth_addr_equals(pn->pf->mac,
+                        (struct eth_addr) ETH_ADDR_C(00,53,00,00,00,42)));
+
+    pn = port_table_lookup_pf_mac_vf(
+        port_table,
+        (struct eth_addr) ETH_ADDR_C(00,53,00,00,00,42),
+        0);
+    ovs_assert(pn);
+    ovs_assert(pn->netdev_ifindex == 1000);
+
+    _destroy_store();
+}
+
+static void
+test_port_table_delete_devlink_port(struct ovs_cmdl_context *ctx OVS_UNUSED)
+{
+    struct dl_port dl_port = {
+        .bus_name = "pci",
+        .dev_name = "0000:03:00.0",
+        .netdev_ifindex = 1000,
+        .netdev_name = "pf0vf0",
+        .number = UINT32_MAX,
+        .pci_pf_number = 0,
+        .pci_vf_number = 0,
+        .flavour = DEVLINK_PORT_FLAVOUR_PCI_VF,
+    };
+    struct port_node *pn;
+
+    _init_store();
+
+    port_table_update_devlink_port(&dl_port);
+
+    pn = port_table_lookup_ifindex(port_table, 1000);
+    ovs_assert(pn);
+
+    port_table_delete_devlink_port(&dl_port);
+    pn = port_table_lookup_ifindex(port_table, 1000);
+    ovs_assert(!pn);
+
+    _destroy_store();
+}
+
+static void
+test_port_table_update_devlink_port_compat(
+    struct ovs_cmdl_context *ctx OVS_UNUSED)
+{
+    struct dl_port dl_pf_port = {
+        .bus_name = "pci",
+        .dev_name = "0000:03:00.0",
+        .netdev_ifindex = 100,
+        .netdev_name = "pf0hpf",
+        .number = UINT32_MAX,
+        .pci_pf_number = 0,
+        .pci_vf_number = UINT16_MAX,
+        .flavour = DEVLINK_PORT_FLAVOUR_PCI_PF,
+    };
+    struct port_node *pn;
+
+    _init_store();
+
+    port_table_delete_entry(port_table, "pci", "0000:03:00.0",
+                            UINT32_MAX, 0, UINT16_MAX,
+                            DEVLINK_PORT_FLAVOUR_PCI_PF);
+
+    /* check that when we add a PF with zero MAC address, the compat sysfs
+     * interface is used to retrieve the MAC. */
+    port_table_update_devlink_port(&dl_pf_port);
+
+    pn = port_table_lookup_phy_bus_dev(port_table, "pci", "0000:03:00.0",
+                                       DEVLINK_PORT_FLAVOUR_PCI_PF, 0);
+    ovs_assert(pn);
+    ovs_assert(
+        eth_addr_equals(pn->mac,
+                        (struct eth_addr) ETH_ADDR_C(00,53,00,00,00,51)));
+
+
+    _destroy_store();
+}
+
+static void
 test_vif_plug_representor_main(int argc, char **argv) {
     set_program_name(*argv);
     static const struct ovs_cmdl_command commands[] = {
-        {"phy-store", NULL, 0, 0, test_phy_store, OVS_RO},
-        {"port-store", NULL, 0, 0, test_port_store, OVS_RO},
+        {"store-phy", NULL, 0, 0, test_phy_store, OVS_RO},
+        {"store-port", NULL, 0, 0, test_port_store, OVS_RO},
+        {"store-devlink-port-update", NULL, 0, 0,
+         test_port_table_update_devlink_port, OVS_RO},
+        {"store-devlink-port-delete", NULL, 0, 0,
+         test_port_table_delete_devlink_port, OVS_RO},
+        {"store-devlink-port-update-compat", NULL, 0, 0,
+         test_port_table_update_devlink_port_compat, OVS_RO},
         {NULL, NULL, 0, 0, NULL, OVS_RO},
     };
     struct ovs_cmdl_context ctx;
