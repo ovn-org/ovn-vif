@@ -9,7 +9,8 @@ jobs:
     env:
       dependencies: |
         automake libtool gcc bc libssl-dev llvm-dev libelf-dev \
-        libnuma-dev libpcap-dev ncat libunbound-dev libunwind-dev
+        libnuma-dev libpcap-dev ncat libunbound-dev libunwind-dev \
+        libudev-dev
       CC:        ${{ matrix.compiler }}
       TESTSUITE: ${{ matrix.testsuite }}
       ASAN:      ${{ matrix.asan }}

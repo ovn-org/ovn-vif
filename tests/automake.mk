@@ -48,6 +48,12 @@ tests_ovstest_SOURCES = \
 tests_ovstest_LDADD = \
 	$(OVS_LIBDIR)/libopenvswitch.la \
         lib/netlink-devlink.$(OBJEXT)
+
+if HAVE_UDEV
+tests_ovstest_LDADD += \
+	-ludev
+endif
+
 tests_ovstest_CPPFLAGS = $(AM_CPPFLAGS)
 tests_ovstest_CPPFLAGS += \
 	-DOVSTEST \

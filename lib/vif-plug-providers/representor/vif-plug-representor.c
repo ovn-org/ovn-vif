@@ -19,6 +19,10 @@
 #include <linux/devlink.h>
 #include <net/if.h>
 
+#ifdef HAVE_UDEV
+#include <libudev.h>
+#endif /* HAVE_UDEV */
+
 #include "vif-plug-provider.h"
 
 #include "hash.h"
@@ -136,8 +140,13 @@ static bool port_node_rename_expected(struct port_node *pn) OVS_UNUSED;
 static bool
 port_node_rename_expected(struct port_node *pn)
 {
+#ifdef HAVE_UDEV
     return pn->port_node_source == PORT_NODE_SOURCE_RUNTIME
            && pn->netdev_renamed == false;
+#else
+    return false;
+#endif /* HAVE_UDEV */
+
 }
 
 static struct port_table *
@@ -389,6 +398,11 @@ port_table_delete_entry(struct port_table *tbl,
 
 static struct nl_sock *devlink_monitor_sock;
 
+#ifdef HAVE_UDEV
+static struct udev *udev;
+static struct udev_monitor *udev_monitor;
+#endif /* HAVE_UDEV */
+
 static bool compat_get_host_pf_mac(const char *, struct eth_addr *);
 
 static void
@@ -566,6 +580,109 @@ devlink_monitor_run(void)
     return changed;
 }
 
+#ifdef HAVE_UDEV
+static void
+udev_monitor_init(void)
+{
+    udev = udev_new();
+    if (!udev) {
+        VLOG_ERR("unable to initialize udev context.");
+        return;
+    }
+
+    udev_monitor = udev_monitor_new_from_netlink(udev, "kernel");
+    if (!udev_monitor) {
+        VLOG_ERR("unable to initialize udev monitor.");
+        return;
+    }
+    if (udev_monitor_filter_add_match_subsystem_devtype(
+            udev_monitor, "net", NULL) < 0) {
+        VLOG_WARN("unable to initialize udev monitor filter.");
+    }
+    if (udev_monitor_enable_receiving(udev_monitor) < 0) {
+        VLOG_ERR("unable to initialize udev monitor.");
+        return;
+    }
+    if (udev_monitor_set_receive_buffer_size(udev_monitor,
+                                             128 * 1024 * 1024) < 0) {
+        VLOG_ERR("unable to set udev receive buffer size.");
+        return;
+    }
+}
+#endif /* HAVE_UDEV */
+
+static bool
+udev_monitor_run(void)
+{
+    bool changed = false;
+#ifdef HAVE_UDEV
+    int fd;
+    char buf[1];
+    size_t n_recv;
+    struct udev_device *dev;
+
+    fd = udev_monitor_get_fd(udev_monitor);
+
+    for (;;) {
+        n_recv = recv(fd, buf, 1, MSG_DONTWAIT | MSG_PEEK);
+        if (n_recv == -1) {
+            if (errno == EAGAIN) {
+                /* Nothing to do. */
+                break;
+            } else {
+                VLOG_ERR("error on udev monitor socket: %s",
+                         ovs_strerror(errno));
+            }
+        } else {
+            dev = udev_monitor_receive_device(udev_monitor);
+            if (!dev) {
+                /* Nothing to do. */
+                break;
+            }
+            const char *udev_action = udev_device_get_action(dev);
+            if (udev_action && !strcmp(udev_action, "move")) {
+                const char *ifindex_str, *sysname;
+                char *cp = NULL;
+                uint32_t ifindex;
+                struct port_node *pn;
+
+                ifindex_str = udev_device_get_sysattr_value(dev, "ifindex");
+                if (!ifindex_str) {
+                    VLOG_WARN("udev: unable to get ifindex of moved netdev.");
+                    goto next;
+                }
+
+                sysname = udev_device_get_sysname(dev);
+                if (!sysname) {
+                    VLOG_ERR("Unable to lookup netdev name from udev.");
+                    goto next;
+                }
+
+                ifindex = strtol(ifindex_str, &cp, 10);
+                if (cp && cp != ifindex_str && *cp != '\0') {
+                    VLOG_WARN("udev provided malformed ifindex: '%s'",
+                              ifindex_str);
+                    goto next;
+                }
+
+                pn = port_table_lookup_ifindex(port_table, ifindex);
+                if (!pn) {
+                    VLOG_DBG("udev move event on port we do not know about "
+                             "ifindex=%s", ifindex_str);
+                    goto next;
+                }
+
+                port_node_update(pn, sysname);
+                changed = true;
+            }
+next:
+            udev_device_unref(dev);
+        }
+    }
+#endif /* HAVE_UDEV */
+    return changed;
+}
+
 static int
 vif_plug_representor_init(void)
 {
@@ -581,13 +698,17 @@ vif_plug_representor_init(void)
         return error;
     }
 
+#ifdef HAVE_UDEV
+    udev_monitor_init();
+#endif /* HAVE_UDEV */
+
     return 0;
 }
 
 static bool
 vif_plug_representor_run(struct vif_plug_class *plug_class OVS_UNUSED)
 {
-    return devlink_monitor_run();
+    return devlink_monitor_run() & udev_monitor_run();
 }
 
 static int
