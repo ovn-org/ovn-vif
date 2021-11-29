@@ -396,6 +396,15 @@ AC_DEFUN([OVS_CHECK_LINUX_NETLINK], [
     [Define to 1 if struct nla_bitfield32 is available.])])
 ])
 
+dnl OVN_VIF_CHECK_UDEV
+dnl
+dnl Check for udev enabled system
+AC_DEFUN([OVN_VIF_CHECK_UDEV], [
+    PKG_CHECK_MODULES([UDEV], [libudev],
+        [AC_DEFINE([HAVE_UDEV], [1], [Use UDEV])])
+    AM_CONDITIONAL(HAVE_UDEV, test x$HAVE_UDEV=xyes)
+])
+
 dnl OVN_VIF_ENABLE_PLUG_REPRESENTOR
 dnl
 dnl Enable the representor plug provider
