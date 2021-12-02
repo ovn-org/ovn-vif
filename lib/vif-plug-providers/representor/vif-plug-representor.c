@@ -136,7 +136,6 @@ port_node_update(struct port_node *pn, const char *netdev_name)
     pn->netdev_name = xstrdup(netdev_name);
 }
 
-static bool port_node_rename_expected(struct port_node *pn) OVS_UNUSED;
 static bool
 port_node_rename_expected(struct port_node *pn)
 {
@@ -761,7 +760,14 @@ vif_plug_representor_port_prepare(const struct vif_plug_port_ctx_in *ctx_in,
                   "lport: %s pf-mac: '%s' vf-num: '%s'",
                   ctx_in->lport_name, opt_pf_mac, opt_vf_num);
         return false;
+    } else if (port_node_rename_expected(pn)) {
+        VLOG_INFO("Lookup of representor port successful, but we anticipate "
+                  "the netdev name to change, refusing plug/update of "
+                  "lport: %s current netdev_name: %s",
+                  ctx_in->lport_name, pn->netdev_name);
+        return false;
     }
+
     if (ctx_out) {
         ctx_out->name = pn->netdev_name;
         ctx_out->type = NULL;
