@@ -1,0 +1,9 @@
+# NETDEVSIM_START([dev-num], [nports])
+#
+# Loads the netdevsim kernel module and creates a new netdevsim device numbered
+# 'dev-num' with 'nports' physical ports.
+m4_define([NETDEVSIM_START],
+  [AT_CHECK([modprobe netdevsim])
+   on_exit 'modprobe -r netdevsim'
+   AT_CHECK([echo "$1 $2" > /sys/bus/netdevsim/new_device] [0], [])
+])

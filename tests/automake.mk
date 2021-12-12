@@ -18,6 +18,7 @@ SYSTEM_KMOD_TESTSUITE_AT = \
 	tests/system-common-macros.at \
 	tests/system-kmod-testsuite.at \
 	tests/system-kmod-macros.at \
+	tests/system-ovn-vif-macros.at \
 	tests/system-plug-representor.at
 
 TESTSUITE = $(srcdir)/tests/testsuite

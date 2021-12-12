@@ -22,5 +22,6 @@ m4_include([tests/ofproto-macros.at])
 m4_include([tests/system-common-macros.at])
 m4_include([tests/system-kmod-macros.at])
 m4_include([tests/ovn-macros.at])
+m4_include([tests/system-ovn-vif-macros.at])
 
 m4_include([tests/system-plug-representor.at])

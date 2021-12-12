@@ -1,0 +1,174 @@
+# CREATE_FAKE_SMART_NIC_NETDEV_TMPDIR([netdev_name], [dst_dir], [pf_mac])
+#
+# Populates 'dst_dir' with the files required to fake a Smart NIC DPU sysfs
+# netdev directory as consumed by OVN VIF representor implementation.
+#
+# NOTE 'dst_dir' will be removed on exit!
+m4_define([CREATE_FAKE_SMART_NIC_NETDEV_TMPDIR],
+  on_exit 'rm -rf $2'
+  mkdir -p $2/smart_nic/pf
+  cp /sys/class/net/$1/ifindex $2/
+  cat <<EOF > $2/smart_nic/pf/config
+MAC        : 00:53:00:00:00:42
+MaxTxRate  : 0
+MinTxRate  : 0
+State      : Follow
+
+EOF
+)
+
+# BIND_MOUNT_NETDEV([netdev_name], [src_dir])
+#
+# Replaces the sysfs representation of netdev as identified by 'netdev_name'
+# with the contents of 'src_dir'.
+m4_define([BIND_MOUNT_NETDEV],
+  mount_point="$(realpath /sys/class/net/$1/device)/net/$1"
+  on_exit 'umount $mount_point'
+  mount --bind $2 $mount_point
+)
+
+AT_BANNER([system-ovn-vif-plug-representor])
+
+AT_SETUP([Runtime update of lookup tables - pcipf hw_addr])
+OVS_CHECK_MIN_KERNEL(5, 13)
+
+ovn_start
+OVS_TRAFFIC_VSWITCHD_START()
+ADD_BR([br-int])
+# Set external-ids in br-int needed for ovn-controller
+ovs-vsctl \
+        -- set Open_vSwitch . external-ids:system-id=hv1 \
+        -- set Open_vSwitch . external-ids:ovn-remote=unix:$ovs_base/ovn-sb/ovn-sb.sock \
+        -- set Open_vSwitch . external-ids:ovn-encap-type=geneve \
+        -- set Open_vSwitch . external-ids:ovn-encap-ip=169.0.0.1 \
+        -- set bridge br-int fail-mode=secure other-config:disable-in-band=true
+
+# Start ovn-controller
+start_daemon ovn-controller
+
+# To confirm the OVN VIF representor lookup tables are successfully updated
+# at runtime we load the netdevsim module and create the PF and VF representor
+# ports after starting the ovn-controller.
+NETDEVSIM_START([10], [1])
+$DEVLINK port add netdevsim/netdevsim10/10 flavour pcipf pfnum 0
+$DEVLINK port function set netdevsim/netdevsim10/10 hw_addr 00:53:00:00:00:42
+echo 4 > /sys/class/net/eni10np1/device/sriov_numvfs
+$DEVLINK dev eswitch set netdevsim/netdevsim10 mode switchdev
+$DEVLINK port show
+
+ovn-nbctl ls-add foo
+
+ovn-nbctl lsp-add foo foo1 \
+    -- lsp-set-addresses foo1 "f0:00:00:01:02:03 192.168.1.2" \
+    -- lsp-set-options foo1 requested-chassis=hv1 \
+        vif-plug-type=representor \
+        "vif-plug:representor:pf-mac=00:53:00:00:00:42" \
+        "vif-plug:representor:vf-num=0"
+
+# The first couple of ovn-controller main loop iterations will fail to lookup
+# the representor due to interface renaming etc.  Since there is nothing else
+# going on in the system we extend the timeout here to ensure the representor
+# port is eventually plugged. In a real world system both system startup
+# sequence and other changes to the database will ensure faster operation.
+_current_ovs_ctl_timeout=$OVS_CTL_TIMEOUT
+export OVS_CTL_TIMEOUT=120
+wait_for_ports_up foo1
+export OVS_CTL_TIMEOUT=$_current_ovs_ctl_timeout
+
+OVS_APP_EXIT_AND_WAIT([ovn-controller])
+
+as ovn-sb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as ovn-nb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as northd
+OVS_APP_EXIT_AND_WAIT([ovn-northd])
+
+# We need some extra ignore sentences here as the netdevsim does not behave
+# just like any normal PCI netdev would.
+as
+OVS_TRAFFIC_VSWITCHD_STOP(["/failed to query port patch-.*/d
+/connection dropped.*/d
+/cannot get.*STP.*/d
+/ethtool command.*/d
+/could not open network device.*/d
+/Unable to find PHYSICAL representor.*/d"])
+
+AT_CLEANUP
+
+# We currently skip this test due to the netdevsim driver not currently
+# properly simulating the association between PF and VF representors.
+AT_SETUP([Runtime update of lookup tables - compat mode])
+AT_SKIP_IF([true])
+OVS_CHECK_MIN_KERNEL(5, 13)
+
+ovn_start
+OVS_TRAFFIC_VSWITCHD_START()
+ADD_BR([br-int])
+# Set external-ids in br-int needed for ovn-controller
+ovs-vsctl \
+        -- set Open_vSwitch . external-ids:system-id=hv1 \
+        -- set Open_vSwitch . external-ids:ovn-remote=unix:$ovs_base/ovn-sb/ovn-sb.sock \
+        -- set Open_vSwitch . external-ids:ovn-encap-type=geneve \
+        -- set Open_vSwitch . external-ids:ovn-encap-ip=169.0.0.1 \
+        -- set bridge br-int fail-mode=secure other-config:disable-in-band=true
+
+# In compat mode we need to create the PF and VF representors prior to starting
+# the ovn-controller to be able to fake the sysfs layout.
+NETDEVSIM_START([10], [1])
+$DEVLINK port add netdevsim/netdevsim10/10 flavour pcipf pfnum 1
+echo 4 > /sys/class/net/eni10np1/device/sriov_numvfs
+$DEVLINK dev eswitch set netdevsim/netdevsim10 mode switchdev
+
+fake_smart_nic_netdev=$(mktemp -d)
+CREATE_FAKE_SMART_NIC_NETDEV_TMPDIR(eni10np1, $fake_smart_nic_netdev,
+                                    00:53:00:00:00:42)
+BIND_MOUNT_NETDEV(eni10np1, $fake_smart_nic_netdev)
+
+$DEVLINK port show
+
+# Start ovn-controller
+start_daemon ovn-controller
+
+ovn-nbctl ls-add foo
+
+ovn-nbctl lsp-add foo foo1 \
+    -- lsp-set-addresses foo1 "f0:00:00:01:02:03 192.168.1.2" \
+    -- lsp-set-options foo1 requested-chassis=hv1 \
+        vif-plug-type=representor \
+        "vif-plug:representor:pf-mac=00:53:00:00:00:42" \
+        "vif-plug:representor:vf-num=0"
+
+# The first couple of ovn-controller main loop iterations will fail to lookup
+# the representor due to interface renaming etc.  Since there is nothing else
+# going on in the system we extend the timeout here to ensure the representor
+# port is eventually plugged. In a real world system other changes to the
+# database will ensure faster operation.
+_current_ovs_ctl_timeout=$OVS_CTL_TIMEOUT
+export OVS_CTL_TIMEOUT=120
+wait_for_ports_up foo1
+export OVS_CTL_TIMEOUT=$_current_ovs_ctl_timeout
+
+OVS_APP_EXIT_AND_WAIT([ovn-controller])
+
+as ovn-sb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as ovn-nb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as northd
+OVS_APP_EXIT_AND_WAIT([ovn-northd])
+
+# We need some extra ignore sentences here as the netdevsim does not behave
+# just like any normal PCI netdev would.
+as
+OVS_TRAFFIC_VSWITCHD_STOP(["/failed to query port patch-.*/d
+/connection dropped.*/d
+/cannot get.*STP.*/d
+/ethtool command.*/d
+/could not open network device.*/d"])
+
+AT_CLEANUP
