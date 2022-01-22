@@ -9,7 +9,8 @@ jobs:
     env:
       dependencies: |
         automake libtool gcc bc libssl-dev llvm-dev libelf-dev \
-        libnuma-dev libpcap-dev ncat libunbound-dev libunwind-dev
+        libnuma-dev libpcap-dev ncat libunbound-dev libunwind-dev \
+        libudev-dev
       CC:        ${{ matrix.compiler }}
       TESTSUITE: ${{ matrix.testsuite }}
       ASAN:      ${{ matrix.asan }}
@@ -80,6 +81,18 @@ jobs:
             || { cat config.log; exit 1; }
         make -j4 || { cat config.log; exit 1; }
 
+    - name: OVN VIF testsuite - test
+      if: matrix.testsuite == 'test'
+      run: |
+        set -euxo pipefail
+        if [ "$ASAN" ]; then
+          export CFLAGS="-fno-omit-frame-pointer -fno-common"
+          export OVN_CFLAGS="-fsanitize=address"
+        fi
+        export DISTCHECK_CONFIGURE_FLAGS="--with-ovs-source=$(realpath ./ovs) --with-ovn-source=$(realpath ./ovn) --enable-plug-representor"
+        make distcheck -j4 TESTSUITEFLAGS="-j4" RECHECK=yes \
+            || { cat */_build/sub/tests/testsuite.log ; exit 1; }
+
     - name: re-configure and build OVN
       run: |
         set -euxo pipefail
@@ -91,7 +104,7 @@ jobs:
         make -j4 || { cat config.log; exit 1; }
         popd
 
-    - name: testsuite - test
+    - name: OVN testsuite - test
       if: matrix.testsuite == 'test'
       run: |
         set -euxo pipefail
