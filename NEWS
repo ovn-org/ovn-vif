@@ -1,5 +1,12 @@
 OVN VIF v21.12.1 - xx xxx xxxx
 ------------------------------
+  - Introduced runtime update of lookup tables.  Before this change lookup
+    tables were populated on initial startup of the ovn-controller only, and as
+    such any representors created after ovn-controller startup would not be
+    available until restart of the ovn-controller.  Systems using systemd and
+    udev should install libudev header- and library- files prior to compiling
+    ovn-vif to enable handling of systemd predictable network interface name
+    functionality.
 
 OVN VIF v21.12.0 - 23 Dec 2021
 ------------------------------

@@ -1,0 +1,17 @@
+AT_BANNER([vif-plug-providers unit tests])
+
+AT_SETUP([representor data store])
+AT_CHECK([ovstest test-vif-plug-representor store-phy], [0], [])
+AT_CHECK([ovstest test-vif-plug-representor store-port], [0], [])
+AT_CHECK([ovstest test-vif-plug-representor store-rename-expected], [0], [])
+AT_CLEANUP
+
+AT_SETUP([representor data store devlink interface])
+AT_CHECK([
+    ovstest test-vif-plug-representor store-devlink-port-update], [0], [])
+AT_CHECK([
+    ovstest test-vif-plug-representor store-devlink-port-delete], [0], [])
+AT_CHECK([
+    ovstest test-vif-plug-representor store-devlink-port-update-compat],
+    [0], [])
+AT_CLEANUP
