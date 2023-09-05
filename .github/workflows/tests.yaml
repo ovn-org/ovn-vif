@@ -10,13 +10,13 @@ jobs:
       dependencies: |
         automake libtool gcc bc libssl-dev llvm-dev libelf-dev \
         libnuma-dev libpcap-dev ncat libunbound-dev libunwind-dev \
-        libudev-dev
+        libudev-dev python3-scapy
       CC:        ${{ matrix.compiler }}
       TESTSUITE: ${{ matrix.testsuite }}
       ASAN:      ${{ matrix.asan }}
 
     name: linux ${{ join(matrix.*, ' ') }}
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
 
     strategy:
       fail-fast: false
