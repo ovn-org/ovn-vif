@@ -610,7 +610,7 @@ udev_monitor_init(void)
     err = udev_monitor_set_receive_buffer_size(udev_monitor,
                                                128 * 1024 * 1024);
     if (err < 0) {
-        VLOG_ERR("unable to set udev receive buffer size: %s",
+        VLOG_INFO("unable to set udev receive buffer size: %s",
                  ovs_strerror(-err));
         return;
     }
