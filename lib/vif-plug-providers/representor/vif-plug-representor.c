@@ -585,26 +585,33 @@ udev_monitor_init(void)
 {
     udev = udev_new();
     if (!udev) {
-        VLOG_ERR("unable to initialize udev context.");
+        VLOG_ERR("unable to initialize udev context: %s", ovs_strerror(errno));
         return;
     }
 
     udev_monitor = udev_monitor_new_from_netlink(udev, "kernel");
     if (!udev_monitor) {
-        VLOG_ERR("unable to initialize udev monitor.");
+        VLOG_ERR("unable to initialize udev monitor: %s", ovs_strerror(errno));
         return;
     }
-    if (udev_monitor_filter_add_match_subsystem_devtype(
-            udev_monitor, "net", NULL) < 0) {
-        VLOG_WARN("unable to initialize udev monitor filter.");
+
+    int err;
+    err = udev_monitor_filter_add_match_subsystem_devtype(
+        udev_monitor, "net", NULL);
+    if (err < 0) {
+        VLOG_WARN("unable to initialize udev monitor filter: %s",
+                  ovs_strerror(-err));
     }
-    if (udev_monitor_enable_receiving(udev_monitor) < 0) {
-        VLOG_ERR("unable to initialize udev monitor.");
+    err = udev_monitor_enable_receiving(udev_monitor);
+    if (err < 0) {
+        VLOG_ERR("unable to initialize udev monitor: %s", ovs_strerror(-err));
         return;
     }
-    if (udev_monitor_set_receive_buffer_size(udev_monitor,
-                                             128 * 1024 * 1024) < 0) {
-        VLOG_ERR("unable to set udev receive buffer size.");
+    err = udev_monitor_set_receive_buffer_size(udev_monitor,
+                                               128 * 1024 * 1024);
+    if (err < 0) {
+        VLOG_ERR("unable to set udev receive buffer size: %s",
+                 ovs_strerror(-err));
         return;
     }
 }
