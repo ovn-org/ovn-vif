@@ -1,5 +1,7 @@
 Post 23.03
 ----------
+  - Log reason for failure to initialize udev monitoring and lower the
+    severity of logging on failure to set udev recv buffer size.
 
 OVN VIF v23.03.0 - 06 Mar 2023
 ------------------------------
