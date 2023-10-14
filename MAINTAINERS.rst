@@ -33,7 +33,7 @@ changes to the OVN VIF git repository.
 
    * - Name
      - Email
-   * - Dmitrii Shcherbakov
-     - dmitrii.shcherbakov@canonical.com
    * - Frode Nordahl
      - frode.nordahl@canonical.com
+   * - Martin Kalcok
+     - martin.kalcok@canonical.com
