@@ -10,10 +10,12 @@ on:
 jobs:
   build-linux:
     env:
-      dependencies: |
+      apt-dependencies: |
         automake libtool gcc bc libssl-dev llvm-dev libelf-dev \
         libnuma-dev libpcap-dev ncat libunbound-dev libunwind-dev \
-        libudev-dev python3-scapy
+        libudev-dev python3-pip
+      pip-dependencies: |
+        scapy
       CC:        ${{ matrix.compiler }}
       TESTSUITE: ${{ matrix.testsuite }}
       ASAN:      ${{ matrix.asan }}
@@ -58,7 +60,8 @@ jobs:
         set -euxo pipefail
         sudo apt update
         sudo apt remove -y netcat-openbsd
-        sudo apt -y install ${{ env.dependencies }}
+        sudo apt -y install ${{ env.apt-dependencies }}
+        sudo pip install ${{ env.pip-dependencies }}
 
     - name: build OVS
       run: |
