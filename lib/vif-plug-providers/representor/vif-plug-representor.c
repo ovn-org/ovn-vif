@@ -732,40 +732,75 @@ vif_plug_representor_port_prepare(const struct vif_plug_port_ctx_in *ctx_in,
     if (ctx_in->op_type == PLUG_OP_REMOVE) {
         return true;
     }
+
+    const char *opt_flavor = smap_get(&ctx_in->lport_options,
+                                   "vif-plug:representor:flavor");
     const char *opt_pf_mac = smap_get(&ctx_in->lport_options,
                                    "vif-plug:representor:pf-mac");
     const char *opt_vf_num = smap_get(&ctx_in->lport_options,
                                    "vif-plug:representor:vf-num");
-    if (!opt_pf_mac || !opt_vf_num) {
-         return false;
-    }
-
+    const char *opt_bus_name = smap_get(&ctx_in->lport_options,
+                                   "vif-plug:representor:bus-name");
+    const char *opt_dev_name = smap_get(&ctx_in->lport_options,
+                                   "vif-plug:representor:dev-name");
+    const char *opt_pf_num = smap_get(&ctx_in->lport_options,
+                                   "vif-plug:representor:pf-num");
     /* Ensure lookup tables are up to date */
     vif_plug_representor_run(NULL);
 
-    struct eth_addr pf_mac;
-    if (!eth_addr_from_string(opt_pf_mac, &pf_mac)) {
-        VLOG_WARN("Unable to parse option as Ethernet address for lport: %s "
-                  "pf-mac: '%s' vf-num: '%s'",
-                  ctx_in->lport_name, opt_pf_mac, opt_vf_num);
+    struct port_node *pn;
+
+    char *cp_flavor = NULL;
+    uint16_t flavor = strtol(opt_flavor, &cp_flavor, 10);
+    if (cp_flavor && cp_flavor != opt_flavor && *cp_flavor != '\0') {
+        VLOG_WARN("Unable to parse option as flavor for lport: %s "
+                  "flavor: '%s'",
+                  ctx_in->lport_name, opt_flavor);
+    }
+
+    if (flavor==DEVLINK_PORT_FLAVOUR_PCI_VF) {
+        if (!opt_pf_mac || !opt_vf_num) {
+            return false;
+        }
+        struct eth_addr pf_mac;
+        if (!eth_addr_from_string(opt_pf_mac, &pf_mac)) {
+            VLOG_WARN("Unable to parse option as Ethernet address for lport: %s "
+                      "pf-mac: '%s' vf-num: '%s'",
+                      ctx_in->lport_name, opt_pf_mac, opt_vf_num);
+            return false;
+        }
+
+        char *cp = NULL;
+        uint16_t vf_num = strtol(opt_vf_num, &cp, 10);
+        if (cp && cp != opt_vf_num && *cp != '\0') {
+            VLOG_WARN("Unable to parse option as VF number for lport: %s "
+                      "pf-mac: '%s' vf-num: '%s'",
+                      ctx_in->lport_name, opt_pf_mac, opt_vf_num);
+        }
+        pn = port_table_lookup_pf_mac_vf(port_table, pf_mac, vf_num);
+    }
+    else if(flavor==DEVLINK_PORT_FLAVOUR_PCI_PF) {
+
+        char *cp = NULL;
+        uint16_t pf_num = strtol(opt_pf_num, &cp, 10);
+        if (cp && cp != opt_pf_num && *cp != '\0') {
+            VLOG_WARN("Unable to parse option as PF number for lport: %s "
+                      "pf-num: '%s'",
+                      ctx_in->lport_name, opt_pf_num);
+        }
+        pn = port_table_lookup_phy_bus_dev(port_table, opt_bus_name,
+                                           opt_dev_name,
+                                           flavor, pf_num);
+    }
+    else {
+        VLOG_INFO("Flavor not supported '%d 'for lport: %s",
+                  flavor, ctx_in->lport_name);
         return false;
     }
 
-    char *cp = NULL;
-    uint16_t vf_num = strtol(opt_vf_num, &cp, 10);
-    if (cp && cp != opt_vf_num && *cp != '\0') {
-        VLOG_WARN("Unable to parse option as VF number for lport: %s "
-                  "pf-mac: '%s' vf-num: '%s'",
-                  ctx_in->lport_name, opt_pf_mac, opt_vf_num);
-    }
-
-    struct port_node *pn;
-    pn = port_table_lookup_pf_mac_vf(port_table, pf_mac, vf_num);
-
     if (!pn || !pn->netdev_name) {
         VLOG_INFO("No representor port found for "
-                  "lport: %s pf-mac: '%s' vf-num: '%s'",
-                  ctx_in->lport_name, opt_pf_mac, opt_vf_num);
+                  "lport: %s", ctx_in->lport_name);
         return false;
     } else if (port_node_rename_expected(pn)) {
         VLOG_INFO("Lookup of representor port successful, but we anticipate "
