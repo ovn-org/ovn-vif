@@ -15,3 +15,20 @@ AT_CHECK([
     ovstest test-vif-plug-representor store-devlink-port-update-compat],
     [0], [])
 AT_CLEANUP
+
+AT_SETUP([representor port-prepare])
+dnl VF representor lookup still works with pf-mac and vf-num specified
+AT_CHECK([ovstest test-vif-plug-representor port-prepare-vf], [0], [])
+
+dnl PF representor lookup works when only pf-mac is provided
+AT_CHECK([ovstest test-vif-plug-representor port-prepare-pf], [0], [])
+
+dnl Missing pf-mac handling
+AT_CHECK([ovstest test-vif-plug-representor port-prepare-missing-pf-mac],
+         [0], [])
+
+dnl Missing vf-num is gracefully handled
+AT_CHECK([ovstest test-vif-plug-representor port-prepare-missing-vf-num],
+         [0], [])
+
+AT_CLEANUP
