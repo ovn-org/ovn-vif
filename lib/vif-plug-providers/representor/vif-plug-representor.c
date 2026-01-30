@@ -97,9 +97,6 @@ struct port_table {
 };
 
 static struct port_table *port_table;
-static bool netdev_mac_from_sysfs_line(const char *line, struct eth_addr *ea);
-static bool netdev_mac_from_sysfs(const char *ifname, struct eth_addr *ea);
-
 static void
 log_port_table_pf_entries(const char *tag)
 {
@@ -110,8 +107,7 @@ log_port_table_pf_entries(const char *tag)
 
     struct port_node *pn;
     HMAP_FOR_EACH (pn, bus_dev_node, &port_table->bus_dev_table) {
-        if (pn->flavour != DEVLINK_PORT_FLAVOUR_PCI_PF
-            && pn->flavour != DEVLINK_PORT_FLAVOUR_PHYSICAL) {
+        if (pn->flavour != DEVLINK_PORT_FLAVOUR_PCI_PF) {
             continue;
         }
         VLOG_WARN("%s: entry flavour=%u bus=%s dev=%s number=%u netdev=%s "
@@ -258,32 +254,10 @@ static struct port_node *
 port_table_lookup_pf_mac(struct port_table *tbl, struct eth_addr mac)
 {
     struct port_node *pn;
-    struct port_node *phy_match = NULL;
 
     HMAP_FOR_EACH (pn, bus_dev_node, &tbl->bus_dev_table) {
         if (pn->flavour == DEVLINK_PORT_FLAVOUR_PCI_PF
             && eth_addr_equals(pn->mac, mac)) {
-            return pn;
-        }
-        if (!phy_match && pn->flavour == DEVLINK_PORT_FLAVOUR_PHYSICAL
-            && eth_addr_equals(pn->mac, mac)) {
-            phy_match = pn;
-        }
-    }
-    if (phy_match) {
-        return phy_match;
-    }
-
-    /* Check the MACs in case the netdev MAC changed without a
-     * devlink update. */
-    HMAP_FOR_EACH (pn, bus_dev_node, &tbl->bus_dev_table) {
-        if (pn->flavour != DEVLINK_PORT_FLAVOUR_PHYSICAL || !pn->netdev_name) {
-            continue;
-        }
-
-        struct eth_addr netdev_mac;
-        if (netdev_mac_from_sysfs(pn->netdev_name, &netdev_mac)
-            && eth_addr_equals(netdev_mac, mac)) {
             return pn;
         }
     }
@@ -391,28 +365,14 @@ port_table_update_function__(struct port_table *tbl, struct port_node *pf,
 static struct port_node *
 port_table_lookup_pf_for_function(struct port_table *tbl,
                                   const char *bus_name, const char *dev_name,
-                                  uint32_t number, uint16_t pci_pf_number)
+                                  uint16_t pci_pf_number)
 {
     struct port_node *pf;
 
     pf = port_table_lookup_phy_bus_dev(tbl, bus_name, dev_name,
                                        DEVLINK_PORT_FLAVOUR_PCI_PF,
                                        pci_pf_number);
-    if (pf) {
-        return pf;
-    }
-
-    /* On non-DPU devices, PF representors are not present and
-     * so we have to look up a PHYSICAL device instead. */
-    pf = port_table_lookup_phy_bus_dev(tbl, bus_name, dev_name,
-                                       DEVLINK_PORT_FLAVOUR_PHYSICAL,
-                                       number);
-    if (!pf) {
-        pf = port_table_lookup_phy_bus_dev(tbl, bus_name, dev_name,
-                                           DEVLINK_PORT_FLAVOUR_PHYSICAL,
-                                           pci_pf_number);
-    }
-    return NULL;
+    return pf;
 }
 
 /* Inserts or updates an entry in the table. */
@@ -432,47 +392,31 @@ port_table_update_entry(struct port_table *tbl,
              pci_pf_number, pci_vf_number, netdev_ifindex, netdev_name,
              ETH_ADDR_ARGS(mac), port_node_source);
 
-    struct eth_addr mac_used = mac;
-
-    if (eth_addr_is_zero(mac_used)
-        && flavour == DEVLINK_PORT_FLAVOUR_PHYSICAL) {
-        netdev_mac_from_sysfs(netdev_name, &mac_used);
-    }
-
     if (flavour == DEVLINK_PORT_FLAVOUR_PHYSICAL
             || flavour == DEVLINK_PORT_FLAVOUR_PCI_PF) {
         struct port_node *pn = port_table_update_phy__(
             tbl, bus_name, dev_name, netdev_ifindex, netdev_name,
             flavour == DEVLINK_PORT_FLAVOUR_PHYSICAL ? number : pci_pf_number,
-            flavour, mac_used, port_node_source);
+            flavour, mac, port_node_source);
         VLOG_INFO("pf/pfrep add/update: bus=%s dev=%s flavour=%u number=%u "
                   "ifindex=%u netdev=%s mac="ETH_ADDR_FMT" source=%d",
                   bus_name, dev_name, flavour,
                   flavour == DEVLINK_PORT_FLAVOUR_PHYSICAL ? number
                                                            : pci_pf_number,
-                  netdev_ifindex, netdev_name, ETH_ADDR_ARGS(mac_used),
+                  netdev_ifindex, netdev_name, ETH_ADDR_ARGS(mac),
                   port_node_source);
         return pn;
     }
 
     struct port_node *phy;
     phy = port_table_lookup_pf_for_function(tbl, bus_name, dev_name,
-                                            number, pci_pf_number);
+                                            pci_pf_number);
     if (!phy) {
         VLOG_WARN("attempt to add function before having knowledge about PF "
                   "(bus=%s dev=%s flavour=%u number=%u pci_pf_number=%u "
                   "pci_vf_number=%u mac="ETH_ADDR_FMT")",
                   bus_name, dev_name, flavour, number,
-                  pci_pf_number, pci_vf_number, ETH_ADDR_ARGS(mac_used));
-        HMAP_FOR_EACH (phy, bus_dev_node, &tbl->bus_dev_table) {
-            if (phy->flavour == DEVLINK_PORT_FLAVOUR_PHYSICAL) {
-                VLOG_WARN("known PHYSICAL: bus=%s dev=%s number=%u "
-                          "mac="ETH_ADDR_FMT" netdev=%s ifindex=%u",
-                          phy->bus_name, phy->dev_name, phy->number,
-                          ETH_ADDR_ARGS(phy->mac), phy->netdev_name,
-                          phy->netdev_ifindex);
-            }
-        }
+                  pci_pf_number, pci_vf_number, ETH_ADDR_ARGS(mac));
         return NULL;
     }
     return port_table_update_function__(tbl, phy, netdev_ifindex, netdev_name,
@@ -532,7 +476,7 @@ port_table_delete_entry(struct port_table *tbl,
         struct port_node *phy;
 
         phy = port_table_lookup_pf_for_function(tbl, bus_name, dev_name,
-                                                number, pci_pf_number);
+                                                pci_pf_number);
         if (!phy) {
             VLOG_WARN("attempt to remove function with non-existing PF "
                       "bus_dev %s/%s pci_pf_number %d",
@@ -551,56 +495,6 @@ static struct udev_monitor *udev_monitor;
 #endif /* HAVE_UDEV */
 
 static bool compat_get_host_pf_mac(const char *, struct eth_addr *);
-static bool
-netdev_mac_from_sysfs_line(const char *line, struct eth_addr *ea)
-{
-    if (!line || !ea) {
-        return false;
-    }
-
-    char buf[64];
-    size_t len = strnlen(line, sizeof buf);
-    if (len == 0 || len >= sizeof buf) {
-        return false;
-    }
-    memcpy(buf, line, len);
-    buf[len] = '\0';
-
-    char *newline = strchr(buf, '\n');
-    if (newline) {
-        *newline = '\0';
-    }
-
-    return eth_addr_from_string(buf, ea);
-}
-
-static bool
-netdev_mac_from_sysfs(const char *ifname, struct eth_addr *ea)
-{
-#ifdef OVSTEST
-    (void) ifname;
-    (void) ea;
-    return false;
-#else
-    if (!ifname || !ifname[0]) {
-        return false;
-    }
-
-    char *path = xasprintf("/sys/class/net/%s/address", ifname);
-    FILE *f = fopen(path, "r");
-    free(path);
-    if (!f) {
-        return false;
-    }
-    char buf[64];
-    bool ok = false;
-    if (fgets(buf, sizeof buf, f)) {
-        ok = netdev_mac_from_sysfs_line(buf, ea);
-    }
-    fclose(f);
-    return ok;
-#endif
-}
 
 static void
 port_table_update_devlink_port(struct dl_port *port_entry,
@@ -614,14 +508,6 @@ port_table_update_devlink_port(struct dl_port *port_entry,
               port_entry->number, port_entry->pci_pf_number,
               port_entry->pci_vf_number, port_entry->netdev_name,
               port_entry->netdev_ifindex, ETH_ADDR_ARGS(mac));
-
-    if (eth_addr_is_zero(mac) && port_entry->netdev_name &&
-        port_entry->netdev_name != dl_str_not_present) {
-        /* On non-DPU platforms we do not get PF representors and have
-         * to get it from the netdev instead.
-         */
-        netdev_mac_from_sysfs(port_entry->netdev_name, &mac);
-    }
 
     if (port_entry->flavour != DEVLINK_PORT_FLAVOUR_PHYSICAL
             && port_entry->flavour != DEVLINK_PORT_FLAVOUR_PCI_PF
@@ -1285,97 +1171,6 @@ test_port_store(struct ovs_cmdl_context *ctx OVS_UNUSED)
 }
 
 static void
-test_port_store_physical_pf_vf(struct ovs_cmdl_context *ctx OVS_UNUSED)
-{
-    struct port_node *pn;
-    struct eth_addr pf_mac =
-        (struct eth_addr) ETH_ADDR_C(00,53,00,00,00,11);
-
-    port_table = port_table_create();
-
-    port_table_update_entry(
-        port_table, "pci", "0000:03:00.0", 10, "p0", 0,
-        UINT16_MAX, UINT16_MAX, DEVLINK_PORT_FLAVOUR_PHYSICAL,
-        pf_mac, PORT_NODE_SOURCE_DUMP);
-
-    port_table_update_entry(
-        port_table, "pci", "0000:03:00.0", 1000, "p0vf3", UINT32_MAX,
-        0, 3, DEVLINK_PORT_FLAVOUR_PCI_VF,
-        (struct eth_addr) ETH_ADDR_C(00,53,00,00,10,03),
-        PORT_NODE_SOURCE_RUNTIME);
-
-    pn = port_table_lookup_pf_mac_fn(port_table, pf_mac, 3);
-    ovs_assert(pn);
-    ovs_assert(pn->pf);
-    ovs_assert(pn->pf->flavour == DEVLINK_PORT_FLAVOUR_PHYSICAL);
-    ovs_assert(!strcmp(pn->netdev_name, "p0vf3"));
-
-    port_table_delete_entry(port_table, "pci", "0000:03:00.0", UINT32_MAX,
-                            0, 3, DEVLINK_PORT_FLAVOUR_PCI_VF);
-
-    pn = port_table_lookup_pf_mac_fn(port_table, pf_mac, 3);
-    ovs_assert(!pn);
-
-    port_table_destroy(port_table);
-}
-
-static void
-test_port_store_pf_mac_update(struct ovs_cmdl_context *ctx OVS_UNUSED)
-{
-    struct port_node *pn;
-    struct eth_addr zero_mac =
-        (struct eth_addr) ETH_ADDR_C(00,00,00,00,00,00);
-    struct eth_addr pf_mac =
-        (struct eth_addr) ETH_ADDR_C(00,53,00,00,00,12);
-
-    port_table = port_table_create();
-
-    port_table_update_entry(
-        port_table, "pci", "0000:03:00.0", 10, "p0", 0,
-        UINT16_MAX, UINT16_MAX, DEVLINK_PORT_FLAVOUR_PHYSICAL,
-        zero_mac, PORT_NODE_SOURCE_DUMP);
-
-    port_table_update_entry(
-        port_table, "pci", "0000:03:00.0", 1000, "p0vf0", UINT32_MAX,
-        0, 0, DEVLINK_PORT_FLAVOUR_PCI_VF,
-        (struct eth_addr) ETH_ADDR_C(00,53,00,00,10,00),
-        PORT_NODE_SOURCE_RUNTIME);
-
-    pn = port_table_lookup_pf_mac_fn(port_table, zero_mac, 0);
-    ovs_assert(pn);
-
-    port_table_update_entry(
-        port_table, "pci", "0000:03:00.0", 10, "p0", 0,
-        UINT16_MAX, UINT16_MAX, DEVLINK_PORT_FLAVOUR_PHYSICAL,
-        pf_mac, PORT_NODE_SOURCE_DUMP);
-
-    pn = port_table_lookup_pf_mac_fn(port_table, pf_mac, 0);
-    ovs_assert(pn);
-    pn = port_table_lookup_pf_mac_fn(port_table, zero_mac, 0);
-    ovs_assert(!pn);
-
-    port_table_destroy(port_table);
-}
-
-static void
-test_netdev_mac_from_sysfs_line(struct ovs_cmdl_context *ctx OVS_UNUSED)
-{
-    struct eth_addr ea;
-
-    ovs_assert(netdev_mac_from_sysfs_line("00:11:22:33:44:55\n", &ea));
-    ovs_assert(eth_addr_equals(
-        ea, (struct eth_addr) ETH_ADDR_C(00,11,22,33,44,55)));
-
-    ovs_assert(netdev_mac_from_sysfs_line("aa:bb:cc:dd:ee:ff", &ea));
-    ovs_assert(eth_addr_equals(
-        ea, (struct eth_addr) ETH_ADDR_C(aa,bb,cc,dd,ee,ff)));
-
-    ovs_assert(!netdev_mac_from_sysfs_line("", &ea));
-    ovs_assert(!netdev_mac_from_sysfs_line("invalid:mac", &ea));
-    ovs_assert(!netdev_mac_from_sysfs_line(NULL, &ea));
-}
-
-static void
 test_port_prepare_vf(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     struct vif_plug_port_ctx_in ctx_in;
@@ -1603,12 +1398,6 @@ test_vif_plug_representor_main(int argc, char **argv) {
     static const struct ovs_cmdl_command commands[] = {
         {"store-phy", NULL, 0, 0, test_phy_store, OVS_RO},
         {"store-port", NULL, 0, 0, test_port_store, OVS_RO},
-        {"store-port-physical", NULL, 0, 0,
-         test_port_store_physical_pf_vf, OVS_RO},
-        {"store-port-pf-mac-update", NULL, 0, 0,
-         test_port_store_pf_mac_update, OVS_RO},
-        {"sysfs-mac-parse", NULL, 0, 0,
-         test_netdev_mac_from_sysfs_line, OVS_RO},
         {"store-devlink-port-update", NULL, 0, 0,
          test_port_table_update_devlink_port, OVS_RO},
         {"store-devlink-port-delete", NULL, 0, 0,
