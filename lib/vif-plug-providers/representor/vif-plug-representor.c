@@ -43,7 +43,7 @@ enum port_node_source {
 };
 
 struct port_node {
-    struct hmap_node mac_vf_node;
+    struct hmap_node mac_fn_node;
     struct hmap_node ifindex_node;
     struct hmap_node bus_dev_node;
     uint32_t netdev_ifindex;
@@ -68,7 +68,7 @@ struct port_node {
  *
  * This data structure contains three indexes:
  *
- * mac_vf_table   - port_node by PF MAC and VF number.
+ * mac_fn_table   - port_node by PF MAC and VF number.
  * ifindex_table  - port_node by netdev ifindex.
  * bus_dev_table  - port_node by bus/dev name (only contains PHYSICAL and
  *                  PCI_PF ports).
@@ -85,7 +85,7 @@ struct port_node {
  * compat_get_host_pf_mac function).
  */
 struct port_table {
-    struct hmap mac_vf_table; /* Hash table for lookups by mac+vf_num */
+    struct hmap mac_fn_table; /* Hash table for lookups by mac+vf_num */
     uint32_t mac_seed; /* We reuse the OVS mac+vlan hash functions for the
                         * PF MAC+VF number, and they require a uint32_t seed */
     struct hmap ifindex_table; /* Hash table for lookups by ifindex */
@@ -185,7 +185,7 @@ port_table_create(void)
     struct port_table *tbl;
 
     tbl = xmalloc(sizeof *tbl);
-    hmap_init(&tbl->mac_vf_table);
+    hmap_init(&tbl->mac_fn_table);
     tbl->mac_seed = random_uint32();
     hmap_init(&tbl->ifindex_table);
     hmap_init(&tbl->bus_dev_table);
@@ -197,10 +197,10 @@ static void
 port_table_destroy(struct port_table *tbl)
 {
     struct port_node *port_node;
-    HMAP_FOR_EACH_POP (port_node, mac_vf_node, &tbl->mac_vf_table) {
+    HMAP_FOR_EACH_POP (port_node, mac_fn_node, &tbl->mac_fn_table) {
         port_node_destroy(port_node);
     }
-    hmap_destroy(&tbl->mac_vf_table);
+    hmap_destroy(&tbl->mac_fn_table);
 
     /* The PHYSICAL and PF ports are stored in both ifindex_table and
      * bus_dev_table */
@@ -209,14 +209,14 @@ port_table_destroy(struct port_table *tbl)
     }
     hmap_destroy(&tbl->bus_dev_table);
 
-    /* All entries in the ifindex table are also in the mac_vf table or
+    /* All entries in the ifindex table are also in the mac_fn table or
      * bus_dev_table which nodes were destroyed above, so we only
      * need to destroy the hmap data for the ifindex table. */
     hmap_destroy(&tbl->ifindex_table);
     free(tbl);
 }
 
-static uint32_t port_table_hash_mac_vf(const struct port_table *tbl,
+static uint32_t port_table_hash_mac_fn(const struct port_table *tbl,
                                        const struct eth_addr mac,
                                        uint16_t vf_num)
 {
@@ -238,14 +238,14 @@ port_table_lookup_ifindex(struct port_table *tbl, uint32_t netdev_ifindex)
 }
 
 static struct port_node *
-port_table_lookup_pf_mac_vf(struct port_table *tbl, struct eth_addr mac,
+port_table_lookup_pf_mac_fn(struct port_table *tbl, struct eth_addr mac,
                             uint16_t vf_num)
 {
     struct port_node *pn;
 
-    HMAP_FOR_EACH_WITH_HASH (pn, mac_vf_node,
-                             port_table_hash_mac_vf(tbl, mac, vf_num),
-                             &tbl->mac_vf_table) {
+    HMAP_FOR_EACH_WITH_HASH (pn, mac_fn_node,
+                             port_table_hash_mac_fn(tbl, mac, vf_num),
+                             &tbl->mac_fn_table) {
         if (pn->number == vf_num && pn->pf
             && eth_addr_equals(pn->pf->mac, mac)) {
             return pn;
@@ -325,13 +325,13 @@ port_table_rehash_pf_mac(struct port_table *tbl, struct port_node *pf)
     struct port_node *pn;
     struct port_node *next;
 
-    HMAP_FOR_EACH_SAFE (pn, next, mac_vf_node, &tbl->mac_vf_table) {
+    HMAP_FOR_EACH_SAFE (pn, next, mac_fn_node, &tbl->mac_fn_table) {
         if (pn->pf != pf) {
             continue;
         }
-        hmap_remove(&tbl->mac_vf_table, &pn->mac_vf_node);
-        hmap_insert(&tbl->mac_vf_table, &pn->mac_vf_node,
-                    port_table_hash_mac_vf(tbl, pf->mac, pn->number));
+        hmap_remove(&tbl->mac_fn_table, &pn->mac_fn_node);
+        hmap_insert(&tbl->mac_fn_table, &pn->mac_fn_node,
+                    port_table_hash_mac_fn(tbl, pf->mac, pn->number));
     }
 }
 
@@ -380,8 +380,8 @@ port_table_update_function__(struct port_table *tbl, struct port_node *pf,
             bus_name, dev_name, netdev_ifindex, netdev_name, number, flavour, mac, pf,
             port_node_source);
         hmap_insert(&tbl->ifindex_table, &pn->ifindex_node, netdev_ifindex);
-        hmap_insert(&tbl->mac_vf_table, &pn->mac_vf_node,
-                    port_table_hash_mac_vf(tbl, pf->mac, number));
+        hmap_insert(&tbl->mac_fn_table, &pn->mac_fn_node,
+                    port_table_hash_mac_fn(tbl, pf->mac, number));
     } else {
         port_node_update(pn, netdev_name);
     }
@@ -505,14 +505,14 @@ port_table_delete_function__(struct port_table *tbl, struct port_node *pf,
 {
     struct port_node *pn;
 
-    pn = port_table_lookup_pf_mac_vf(tbl, pf->mac, pci_vf_number);
+    pn = port_table_lookup_pf_mac_fn(tbl, pf->mac, pci_vf_number);
     if (!pn) {
         VLOG_WARN("attempt to remove non-existing function %s-%d",
                   pf->netdev_name, pci_vf_number);
         return;
     }
     hmap_remove(&tbl->ifindex_table, &pn->ifindex_node);
-    hmap_remove(&tbl->mac_vf_table, &pn->mac_vf_node);
+    hmap_remove(&tbl->mac_fn_table, &pn->mac_fn_node);
     port_node_destroy(pn);
 }
 
@@ -1000,7 +1000,7 @@ vif_plug_representor_port_prepare(const struct vif_plug_port_ctx_in *ctx_in,
                       ctx_in->lport_name, opt_pf_mac, opt_vf_num);
         }
 
-        pn = port_table_lookup_pf_mac_vf(port_table, pf_mac, vf_num);
+        pn = port_table_lookup_pf_mac_fn(port_table, pf_mac, vf_num);
     } else {
         /* Look up by PF MAC only. */
         pn = port_table_lookup_pf_mac(port_table, pf_mac);
@@ -1252,7 +1252,7 @@ test_port_store(struct ovs_cmdl_context *ctx OVS_UNUSED)
     ovs_assert(pn->pf);
     ovs_assert(!strcmp(pn->pf->netdev_name, "p0hpf"));
 
-    pn = port_table_lookup_pf_mac_vf(
+    pn = port_table_lookup_pf_mac_fn(
         port_table,
         (struct eth_addr) ETH_ADDR_C(00,53,00,00,00,42),
         0);
@@ -1270,7 +1270,7 @@ test_port_store(struct ovs_cmdl_context *ctx OVS_UNUSED)
     pn = port_table_lookup_ifindex(port_table, 1000);
     ovs_assert(!pn);
 
-    pn = port_table_lookup_pf_mac_vf(
+    pn = port_table_lookup_pf_mac_fn(
         port_table,
         (struct eth_addr) ETH_ADDR_C(00,53,00,00,00,42),
         0);
@@ -1304,7 +1304,7 @@ test_port_store_physical_pf_vf(struct ovs_cmdl_context *ctx OVS_UNUSED)
         (struct eth_addr) ETH_ADDR_C(00,53,00,00,10,03),
         PORT_NODE_SOURCE_RUNTIME);
 
-    pn = port_table_lookup_pf_mac_vf(port_table, pf_mac, 3);
+    pn = port_table_lookup_pf_mac_fn(port_table, pf_mac, 3);
     ovs_assert(pn);
     ovs_assert(pn->pf);
     ovs_assert(pn->pf->flavour == DEVLINK_PORT_FLAVOUR_PHYSICAL);
@@ -1313,7 +1313,7 @@ test_port_store_physical_pf_vf(struct ovs_cmdl_context *ctx OVS_UNUSED)
     port_table_delete_entry(port_table, "pci", "0000:03:00.0", UINT32_MAX,
                             0, 3, DEVLINK_PORT_FLAVOUR_PCI_VF);
 
-    pn = port_table_lookup_pf_mac_vf(port_table, pf_mac, 3);
+    pn = port_table_lookup_pf_mac_fn(port_table, pf_mac, 3);
     ovs_assert(!pn);
 
     port_table_destroy(port_table);
@@ -1341,7 +1341,7 @@ test_port_store_pf_mac_update(struct ovs_cmdl_context *ctx OVS_UNUSED)
         (struct eth_addr) ETH_ADDR_C(00,53,00,00,10,00),
         PORT_NODE_SOURCE_RUNTIME);
 
-    pn = port_table_lookup_pf_mac_vf(port_table, zero_mac, 0);
+    pn = port_table_lookup_pf_mac_fn(port_table, zero_mac, 0);
     ovs_assert(pn);
 
     port_table_update_entry(
@@ -1349,9 +1349,9 @@ test_port_store_pf_mac_update(struct ovs_cmdl_context *ctx OVS_UNUSED)
         UINT16_MAX, UINT16_MAX, DEVLINK_PORT_FLAVOUR_PHYSICAL,
         pf_mac, PORT_NODE_SOURCE_DUMP);
 
-    pn = port_table_lookup_pf_mac_vf(port_table, pf_mac, 0);
+    pn = port_table_lookup_pf_mac_fn(port_table, pf_mac, 0);
     ovs_assert(pn);
-    pn = port_table_lookup_pf_mac_vf(port_table, zero_mac, 0);
+    pn = port_table_lookup_pf_mac_fn(port_table, zero_mac, 0);
     ovs_assert(!pn);
 
     port_table_destroy(port_table);
@@ -1520,7 +1520,7 @@ test_port_table_update_devlink_port(struct ovs_cmdl_context *ctx OVS_UNUSED)
                         (struct eth_addr) ETH_ADDR_C(00,53,00,00,00,42)));
     ovs_assert(pn->port_node_source == PORT_NODE_SOURCE_RUNTIME);
 
-    pn = port_table_lookup_pf_mac_vf(
+    pn = port_table_lookup_pf_mac_fn(
         port_table,
         (struct eth_addr) ETH_ADDR_C(00,53,00,00,00,42),
         0);
