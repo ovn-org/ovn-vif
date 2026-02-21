@@ -45,11 +45,11 @@ Logical VF number relative to PF device specified in
 `OVN_Northbound:Logical_Switch_Port:options` key `vif-plug-pf-mac`.
 
 The VF MAC is programmed from the logical port MAC via devlink when running at
-the DPU side. If VF MAC programming is not supported via devlink, ovn-vif logs
-this and continues without failing the plug operation for compatibility reasons
-since the MAC address may also be programmed by the hypervisor services (e.g.
-Libvirt) and it is up to the operator to make sure that an appropriate MAC
-programming method is chosen. Existing systems where this is not supported
-can continue to work the old way until the kernel and/or firmware is upgraded
-to the version where it is, whereas on hardware where this is not supported
-at all, the graceful fallback will continue to be used.
+the DPU side. If VF MAC programming is not supported via devlink (for example
+because of hardware, firmware, or driver limitations), ovn-vif logs this and
+continues without failing the plug operation. In that case, the MAC address may
+be programmed by hypervisor services (e.g. Libvirt), and it is up to the
+operator to ensure an appropriate MAC programming method is in place. This
+allows existing systems to keep working until kernel and/or firmware upgrades
+add support, while platforms that do not support VF MAC programming continue to
+use the graceful fallback.
