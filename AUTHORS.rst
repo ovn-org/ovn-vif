@@ -39,6 +39,7 @@ Andy Zhou                          azhou@ovn.org
 Ben Pfaff                          blp@ovn.org
 Christian Ehrhardt                 christian.ehrhardt@canonical.com
 Daniele Di Proietto                daniele.di.proietto@gmail.com
+Dmitrii Shcherbakov
 Dumitru Ceara                      dceara@redhat.com
 Ed Maste                           emaste@freebsd.org
 Edward Tomasz Napierała            trasz@freebsd.org
