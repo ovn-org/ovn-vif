@@ -1271,15 +1271,24 @@ vif_plug_representor_port_prepare(const struct vif_plug_port_ctx_in *ctx_in,
         }
         log_port_table_pf_entries("representor lookup failed");
         return false;
-    } else if (port_node_rename_expected(pn)) {
+    }
+
+    /* Program VF MAC before the rename check.  MAC programming uses the
+     * devlink port index (bus/dev/port_index), not the netdev name, so
+     * it is safe to issue even while a udev rename is still pending.
+     * This avoids a race where the port is claimed by OVN before the
+     * rename completes: without early programming the MAC would never
+     * be set because subsequent iterations skip already-installed
+     * ports. */
+    vif_plug_representor_program_vf_mac(ctx_in, pn, opt_pf_mac, opt_vf_num);
+
+    if (port_node_rename_expected(pn)) {
         VLOG_INFO("Lookup of representor port successful, but we anticipate "
                   "the netdev name to change, refusing plug/update of "
                   "lport: %s current netdev_name: %s",
                   ctx_in->lport_name, pn->netdev_name);
         return false;
     }
-
-    vif_plug_representor_program_vf_mac(ctx_in, pn, opt_pf_mac, opt_vf_num);
 
     if (ctx_out) {
         ctx_out->name = pn->netdev_name;
