@@ -33,6 +33,7 @@
 #include "netlink-devlink.h"
 #include "packets.h"
 #include "random.h"
+#include "timeval.h"
 #include "openvswitch/shash.h"
 
 VLOG_DEFINE_THIS_MODULE(vif_plug_representor);
@@ -46,10 +47,11 @@ struct port_node {
     struct hmap_node mac_fn_node;
     struct hmap_node ifindex_node;
     struct hmap_node bus_dev_node;
-    uint32_t netdev_ifindex;
-    char *netdev_name;
     char *bus_name;
     char *dev_name;
+    uint32_t port_index;
+    uint32_t netdev_ifindex;
+    char *netdev_name;
     bool netdev_renamed;
     /* Which attribute is stored here depends on the value of 'flavour'.
      *
@@ -60,8 +62,15 @@ struct port_node {
     uint32_t number;
     uint16_t flavour;
     struct eth_addr mac;
+    bool vf_mac_programming_pending;
+    struct eth_addr vf_mac_requested;
+    long long int vf_mac_requested_at;
     struct port_node *pf;
     enum port_node_source port_node_source;
+};
+
+enum {
+    VF_MAC_CONFIRM_TIMEOUT_MS = 5000,
 };
 
 /* Port table.
@@ -120,7 +129,8 @@ log_port_table_pf_entries(const char *tag)
 
 static struct port_node *
 port_node_create(const char *bus_name, const char *dev_name,
-                 uint32_t netdev_ifindex, const char *netdev_name,
+                 uint32_t port_index, uint32_t netdev_ifindex,
+                 const char *netdev_name,
                  uint32_t number, uint16_t flavour,
                  struct eth_addr mac, struct port_node *pf,
                  enum port_node_source port_node_source)
@@ -128,14 +138,18 @@ port_node_create(const char *bus_name, const char *dev_name,
     struct port_node *pn;
 
     pn = xmalloc(sizeof *pn);
-    pn->netdev_ifindex = netdev_ifindex;
-    pn->netdev_name = xstrdup(netdev_name);
     pn->bus_name = xstrdup(bus_name);
     pn->dev_name = xstrdup(dev_name);
+    pn->port_index = port_index;
+    pn->netdev_ifindex = netdev_ifindex;
+    pn->netdev_name = xstrdup(netdev_name);
     pn->netdev_renamed = false;
     pn->number = number;
     pn->flavour = flavour;
     pn->mac = mac;
+    pn->vf_mac_programming_pending = false;
+    pn->vf_mac_requested = eth_addr_zero;
+    pn->vf_mac_requested_at = 0;
     pn->pf = pf;
     pn->port_node_source = port_node_source;
 
@@ -145,11 +159,11 @@ port_node_create(const char *bus_name, const char *dev_name,
 static void
 port_node_destroy(struct port_node *pn)
 {
+    free(pn->bus_name);
+    free(pn->dev_name);
     if (pn->netdev_name) {
         free(pn->netdev_name);
     }
-    free(pn->bus_name);
-    free(pn->dev_name);
     free(pn);
 }
 
@@ -173,6 +187,301 @@ port_node_rename_expected(struct port_node *pn)
     return false;
 #endif /* HAVE_UDEV */
 
+}
+
+static void
+vif_plug_representor_get_hw_addr(const struct port_node *pn,
+                                 struct eth_addr *vf_mac, bool *found,
+                                 int *error);
+static int
+vif_plug_representor_set_hw_addr(const struct port_node *pn,
+                                 const struct eth_addr *vf_mac);
+static bool
+vif_plug_representor_request_vf_mac(struct port_node *pn,
+                                    const struct eth_addr *requested_mac,
+                                    long long int requested_at, int *error);
+static void
+vif_plug_representor_log_vf_mac_set_error(
+    int error, const struct vif_plug_port_ctx_in *ctx_in,
+    const char *opt_pf_mac, const char *opt_vf_num, const char *opt_lport_mac);
+static void
+vif_plug_representor_log_vf_mac_retry_error(
+    int error, const char *reason, const struct port_node *pn,
+    const struct eth_addr *requested_mac);
+
+static void
+port_table_expire_pending_vf_mac_programming(struct port_table *tbl)
+{
+    if (!tbl) {
+        return;
+    }
+    long long int now = time_msec();
+    struct port_node *pn;
+
+    HMAP_FOR_EACH (pn, ifindex_node, &tbl->ifindex_table) {
+        if (!pn->vf_mac_programming_pending) {
+            continue;
+        }
+        if (now - pn->vf_mac_requested_at < VF_MAC_CONFIRM_TIMEOUT_MS) {
+            continue;
+        }
+        struct eth_addr current_mac;
+        bool found;
+        int error;
+
+        vif_plug_representor_get_hw_addr(pn, &current_mac, &found, &error);
+        if (error) {
+            VLOG_WARN("Unable to validate pending VF MAC request on timeout "
+                      "bus=%s dev=%s port-index=%"PRIu32" requested-mac="
+                      ETH_ADDR_FMT" after %lld ms (%s).",
+                      pn->bus_name, pn->dev_name, pn->port_index,
+                      ETH_ADDR_ARGS(pn->vf_mac_requested),
+                      now - pn->vf_mac_requested_at, ovs_strerror(error));
+            pn->vf_mac_programming_pending = false;
+            continue;
+        }
+        if (!found) {
+            VLOG_WARN("Unable to validate pending VF MAC request on timeout "
+                      "bus=%s dev=%s port-index=%"PRIu32" requested-mac="
+                      ETH_ADDR_FMT" after %lld ms (port not found).",
+                      pn->bus_name, pn->dev_name, pn->port_index,
+                      ETH_ADDR_ARGS(pn->vf_mac_requested),
+                      now - pn->vf_mac_requested_at);
+            pn->vf_mac_programming_pending = false;
+            continue;
+        }
+        if (eth_addr_equals(current_mac, pn->vf_mac_requested)) {
+            VLOG_INFO("Validated VF MAC request by polling devlink after "
+                      "timeout bus=%s dev=%s port-index=%"PRIu32" mac="
+                      ETH_ADDR_FMT" after %lld ms.",
+                      pn->bus_name, pn->dev_name, pn->port_index,
+                      ETH_ADDR_ARGS(current_mac),
+                      now - pn->vf_mac_requested_at);
+            pn->mac = current_mac;
+            pn->vf_mac_programming_pending = false;
+            continue;
+        }
+
+        VLOG_WARN("No async devlink confirmation for VF MAC request "
+                  "bus=%s dev=%s port-index=%"PRIu32" requested-mac="
+                  ETH_ADDR_FMT" observed-mac="ETH_ADDR_FMT" after %lld ms; "
+                  "retrying.",
+                  pn->bus_name, pn->dev_name, pn->port_index,
+                  ETH_ADDR_ARGS(pn->vf_mac_requested),
+                  ETH_ADDR_ARGS(current_mac),
+                  now - pn->vf_mac_requested_at);
+
+        if (vif_plug_representor_request_vf_mac(pn, &pn->vf_mac_requested,
+                                                now, &error)) {
+            continue;
+        }
+        vif_plug_representor_log_vf_mac_retry_error(
+            error, "timeout request", pn, &pn->vf_mac_requested);
+        pn->vf_mac_programming_pending = false;
+    }
+}
+
+static bool
+vif_plug_representor_parse_lport_mac(const char *lport_mac,
+                                     struct eth_addr *mac)
+{
+    char mac_buf[ETH_ADDR_STRLEN + 1];
+    size_t mac_len;
+
+    if (!lport_mac) {
+        return false;
+    }
+
+    mac_len = strcspn(lport_mac, " \t");
+    if (!mac_len || mac_len >= sizeof mac_buf) {
+        return false;
+    }
+
+    memcpy(mac_buf, lport_mac, mac_len);
+    mac_buf[mac_len] = '\0';
+
+    return eth_addr_from_string(mac_buf, mac);
+}
+
+#ifdef OVSTEST
+static int ovstest_set_hw_addr_error;
+static size_t ovstest_set_hw_addr_calls;
+static const char *ovstest_set_hw_addr_last_bus_name;
+static const char *ovstest_set_hw_addr_last_dev_name;
+static uint32_t ovstest_set_hw_addr_last_port_index;
+static struct eth_addr ovstest_set_hw_addr_last_mac;
+static int ovstest_get_hw_addr_error;
+static bool ovstest_get_hw_addr_found;
+static struct eth_addr ovstest_get_hw_addr_mac;
+static size_t ovstest_get_hw_addr_calls;
+#endif
+
+/* Indirection that allows OVSTEST to unit test VF MAC programming logic. */
+static int
+vif_plug_representor_set_hw_addr(const struct port_node *pn,
+                                 const struct eth_addr *vf_mac)
+{
+#ifdef OVSTEST
+    ovstest_set_hw_addr_calls++;
+    ovstest_set_hw_addr_last_bus_name = pn->bus_name;
+    ovstest_set_hw_addr_last_dev_name = pn->dev_name;
+    ovstest_set_hw_addr_last_port_index = pn->port_index;
+    ovstest_set_hw_addr_last_mac = *vf_mac;
+    return ovstest_set_hw_addr_error;
+#else
+    return nl_dl_port_function_set_hw_addr(
+        pn->bus_name, pn->dev_name, pn->port_index, vf_mac);
+#endif
+}
+
+static void
+vif_plug_representor_log_vf_mac_set_error(
+    int error, const struct vif_plug_port_ctx_in *ctx_in,
+    const char *opt_pf_mac, const char *opt_vf_num, const char *opt_lport_mac)
+{
+    if (error == EOPNOTSUPP || error == EINVAL) {
+        VLOG_INFO("devlink does not support VF MAC programming for "
+                  "lport: %s pf-mac: '%s' vf-num: '%s' mac: '%s' "
+                  "(%s)",
+                  ctx_in->lport_name, opt_pf_mac, opt_vf_num, opt_lport_mac,
+                  ovs_strerror(error));
+    } else {
+        VLOG_WARN("Failed to program VF MAC via devlink for lport: %s "
+                  "pf-mac: '%s' vf-num: '%s' mac: '%s' (%s)",
+                  ctx_in->lport_name, opt_pf_mac, opt_vf_num, opt_lport_mac,
+                  ovs_strerror(error));
+    }
+}
+
+static void
+vif_plug_representor_log_vf_mac_retry_error(
+    int error, const char *reason, const struct port_node *pn,
+    const struct eth_addr *requested_mac)
+{
+    if (error == EOPNOTSUPP || error == EINVAL) {
+        VLOG_INFO("devlink does not support VF MAC programming while "
+                  "retrying %s bus=%s dev=%s port-index=%"PRIu32
+                  " requested-mac="ETH_ADDR_FMT" (%s)",
+                  reason, pn->bus_name, pn->dev_name, pn->port_index,
+                  ETH_ADDR_ARGS(*requested_mac), ovs_strerror(error));
+    } else {
+        VLOG_WARN("Failed to retry VF MAC programming (%s) bus=%s dev=%s "
+                  "port-index=%"PRIu32" requested-mac="ETH_ADDR_FMT" "
+                  "(%s)",
+                  reason, pn->bus_name, pn->dev_name, pn->port_index,
+                  ETH_ADDR_ARGS(*requested_mac), ovs_strerror(error));
+    }
+}
+
+static bool
+vif_plug_representor_request_vf_mac(struct port_node *pn,
+                                    const struct eth_addr *requested_mac,
+                                    long long int requested_at, int *error)
+{
+    *error = vif_plug_representor_set_hw_addr(pn, requested_mac);
+    if (*error) {
+        return false;
+    }
+    pn->mac = *requested_mac;
+    pn->vf_mac_requested = *requested_mac;
+    pn->vf_mac_requested_at = requested_at;
+    return true;
+}
+
+static void
+vif_plug_representor_get_hw_addr(const struct port_node *pn,
+                                 struct eth_addr *vf_mac, bool *found,
+                                 int *error)
+{
+#ifdef OVSTEST
+    (void) pn;
+    ovstest_get_hw_addr_calls++;
+    *vf_mac = ovstest_get_hw_addr_mac;
+    *found = ovstest_get_hw_addr_found;
+    *error = ovstest_get_hw_addr_error;
+#else
+    struct nl_dl_dump_state *port_dump;
+    struct dl_port port_entry;
+
+    *vf_mac = eth_addr_zero;
+    *found = false;
+    *error = 0;
+
+    port_dump = nl_dl_dump_init();
+    *error = nl_dl_dump_init_error(port_dump);
+    if (*error) {
+        nl_dl_dump_destroy(port_dump);
+        return;
+    }
+
+    nl_dl_dump_start(DEVLINK_CMD_PORT_GET, port_dump);
+    while (nl_dl_port_dump_next(port_dump, &port_entry)) {
+        if (strcmp(port_entry.bus_name, pn->bus_name)
+                || strcmp(port_entry.dev_name, pn->dev_name)
+                || port_entry.index != pn->port_index) {
+            continue;
+        }
+        *vf_mac = port_entry.function.eth_addr;
+        *found = true;
+        break;
+    }
+
+    *error = nl_dl_dump_finish(port_dump);
+    nl_dl_dump_destroy(port_dump);
+#endif
+}
+
+static void
+vif_plug_representor_program_vf_mac(
+        const struct vif_plug_port_ctx_in *ctx_in, struct port_node *pn,
+        const char *opt_pf_mac, const char *opt_vf_num)
+{
+    const char *opt_lport_mac = smap_get(&ctx_in->lport_options, "mac");
+    if (!opt_lport_mac) {
+        opt_lport_mac = smap_get(&ctx_in->lport_options, "addresses");
+    }
+    struct eth_addr vf_mac;
+    if (!vif_plug_representor_parse_lport_mac(opt_lport_mac, &vf_mac)) {
+        if (opt_lport_mac) {
+            VLOG_WARN("Unable to parse logical port MAC for lport: %s "
+                      "mac: '%s'",
+                      ctx_in->lport_name, opt_lport_mac);
+        }
+        return;
+    }
+
+    if (pn->flavour != DEVLINK_PORT_FLAVOUR_PCI_VF) {
+        VLOG_INFO("Skipping VF MAC programming for non-VF representor "
+                  "lport: %s pf-mac: '%s' vf-num: '%s' mac: '%s'",
+                  ctx_in->lport_name, opt_pf_mac, opt_vf_num, opt_lport_mac);
+        return;
+    }
+
+    if (!pn->bus_name || !pn->dev_name || pn->port_index == UINT32_MAX) {
+        VLOG_WARN("Insufficient devlink metadata to program VF MAC for "
+                  "lport: %s pf-mac: '%s' vf-num: '%s' mac: '%s'",
+                  ctx_in->lport_name, opt_pf_mac, opt_vf_num, opt_lport_mac);
+        return;
+    }
+
+    if (eth_addr_equals(pn->mac, vf_mac)) {
+        return;
+    }
+
+    struct eth_addr old_mac = pn->mac;
+    int error;
+    if (vif_plug_representor_request_vf_mac(pn, &vf_mac, time_msec(),
+                                            &error)) {
+        pn->vf_mac_programming_pending = true;
+        VLOG_INFO("Requested VF MAC programming via devlink for lport: %s "
+                  "pf-mac: '%s' vf-num: '%s' old-mac: "ETH_ADDR_FMT
+                  " new-mac: "ETH_ADDR_FMT,
+                  ctx_in->lport_name, opt_pf_mac, opt_vf_num,
+                  ETH_ADDR_ARGS(old_mac), ETH_ADDR_ARGS(vf_mac));
+        return;
+    }
+    vif_plug_representor_log_vf_mac_set_error(error, ctx_in, opt_pf_mac,
+                                              opt_vf_num, opt_lport_mac);
 }
 
 static struct port_table *
@@ -310,10 +619,12 @@ port_table_rehash_pf_mac(struct port_table *tbl, struct port_node *pf)
 }
 
 
+
 static struct port_node *
 port_table_update_phy__(struct port_table *tbl,
                         const char *bus_name, const char *dev_name,
-                        uint32_t netdev_ifindex, const char *netdev_name,
+                        uint32_t port_index, uint32_t netdev_ifindex,
+                        const char *netdev_name,
                         uint32_t number, uint16_t flavour,
                         struct eth_addr mac,
                         enum port_node_source port_node_source)
@@ -323,7 +634,8 @@ port_table_update_phy__(struct port_table *tbl,
     pn = port_table_lookup_phy_bus_dev(tbl, bus_name, dev_name,
                                        flavour, number);
     if (!pn) {
-        pn = port_node_create(bus_name, dev_name, netdev_ifindex, netdev_name,
+        pn = port_node_create(bus_name, dev_name, port_index,
+                              netdev_ifindex, netdev_name,
                               number, flavour, mac, NULL, port_node_source);
         hmap_insert(&tbl->ifindex_table, &pn->ifindex_node, netdev_ifindex);
         hmap_insert(&tbl->bus_dev_table, &pn->bus_dev_node,
@@ -341,23 +653,73 @@ port_table_update_phy__(struct port_table *tbl,
 
 static struct port_node *
 port_table_update_function__(struct port_table *tbl, struct port_node *pf,
-                             uint32_t netdev_ifindex, const char *netdev_name,
+                             const char *bus_name, const char *dev_name,
+                             uint32_t port_index, uint32_t netdev_ifindex,
+                             const char *netdev_name,
                              uint32_t number, uint16_t flavour,
                              struct eth_addr mac,
-                             enum port_node_source port_node_source,
-                             const char *bus_name, const char *dev_name)
+                             enum port_node_source port_node_source)
 {
     struct port_node *pn = port_table_lookup_ifindex(tbl, netdev_ifindex);
 
     if (!pn) {
         pn = port_node_create(
-            bus_name, dev_name, netdev_ifindex, netdev_name, number, flavour, mac, pf,
+            bus_name, dev_name, port_index, netdev_ifindex, netdev_name,
+            number, flavour, mac, pf,
             port_node_source);
         hmap_insert(&tbl->ifindex_table, &pn->ifindex_node, netdev_ifindex);
         hmap_insert(&tbl->mac_fn_table, &pn->mac_fn_node,
                     port_table_hash_mac_fn(tbl, pf->mac, number));
     } else {
+        struct eth_addr old_mac = pn->mac;
+        bool was_pending = pn->vf_mac_programming_pending;
+        struct eth_addr requested_mac = pn->vf_mac_requested;
+        long long int request_age_ms = time_msec() - pn->vf_mac_requested_at;
+
+        pn->port_index = port_index;
+        pn->mac = mac;
         port_node_update(pn, netdev_name);
+
+        if (was_pending && flavour == DEVLINK_PORT_FLAVOUR_PCI_VF) {
+            bool keep_pending = false;
+            if (eth_addr_is_zero(mac)) {
+                VLOG_WARN("Received async devlink update without VF MAC "
+                          "for pending request bus=%s dev=%s port-index=%"
+                          PRIu32" requested-mac="ETH_ADDR_FMT,
+                          pn->bus_name, pn->dev_name, pn->port_index,
+                          ETH_ADDR_ARGS(requested_mac));
+            } else if (eth_addr_equals(mac, requested_mac)) {
+                VLOG_INFO("Confirmed async devlink VF MAC update "
+                          "bus=%s dev=%s port-index=%"PRIu32" mac="
+                          ETH_ADDR_FMT" in %lld ms.",
+                          pn->bus_name, pn->dev_name, pn->port_index,
+                          ETH_ADDR_ARGS(mac), request_age_ms);
+            } else {
+                VLOG_WARN("Async devlink VF MAC update mismatch "
+                          "bus=%s dev=%s port-index=%"PRIu32
+                          " requested-mac="ETH_ADDR_FMT" observed-mac="
+                          ETH_ADDR_FMT" after %lld ms; retrying.",
+                          pn->bus_name, pn->dev_name, pn->port_index,
+                          ETH_ADDR_ARGS(requested_mac),
+                          ETH_ADDR_ARGS(mac), request_age_ms);
+                int error;
+                if (vif_plug_representor_request_vf_mac(
+                        pn, &requested_mac, time_msec(), &error)) {
+                    keep_pending = true;
+                } else {
+                    vif_plug_representor_log_vf_mac_retry_error(
+                        error, "async mismatch", pn, &requested_mac);
+                }
+            }
+            pn->vf_mac_programming_pending = keep_pending;
+        } else if (flavour == DEVLINK_PORT_FLAVOUR_PCI_VF
+                   && !eth_addr_equals(old_mac, mac)) {
+            VLOG_INFO("Observed devlink VF MAC change "
+                      "bus=%s dev=%s port-index=%"PRIu32" old-mac="
+                      ETH_ADDR_FMT" new-mac="ETH_ADDR_FMT,
+                      pn->bus_name, pn->dev_name, pn->port_index,
+                      ETH_ADDR_ARGS(old_mac), ETH_ADDR_ARGS(mac));
+        }
     }
     return pn;
 }
@@ -379,7 +741,8 @@ port_table_lookup_pf_for_function(struct port_table *tbl,
 static struct port_node *
 port_table_update_entry(struct port_table *tbl,
                         const char *bus_name, const char *dev_name,
-                        uint32_t netdev_ifindex, const char *netdev_name,
+                        uint32_t port_index, uint32_t netdev_ifindex,
+                        const char *netdev_name,
                         uint32_t number, uint16_t pci_pf_number,
                         uint16_t pci_vf_number, uint16_t flavour,
                         struct eth_addr mac,
@@ -395,7 +758,7 @@ port_table_update_entry(struct port_table *tbl,
     if (flavour == DEVLINK_PORT_FLAVOUR_PHYSICAL
             || flavour == DEVLINK_PORT_FLAVOUR_PCI_PF) {
         struct port_node *pn = port_table_update_phy__(
-            tbl, bus_name, dev_name, netdev_ifindex, netdev_name,
+            tbl, bus_name, dev_name, port_index, netdev_ifindex, netdev_name,
             flavour == DEVLINK_PORT_FLAVOUR_PHYSICAL ? number : pci_pf_number,
             flavour, mac, port_node_source);
         VLOG_INFO("pf/pfrep add/update: bus=%s dev=%s flavour=%u number=%u "
@@ -419,9 +782,11 @@ port_table_update_entry(struct port_table *tbl,
                   pci_pf_number, pci_vf_number, ETH_ADDR_ARGS(mac));
         return NULL;
     }
-    return port_table_update_function__(tbl, phy, netdev_ifindex, netdev_name,
+    return port_table_update_function__(tbl, phy, bus_name, dev_name,
+                                        port_index, netdev_ifindex,
+                                        netdev_name,
                                         pci_vf_number, flavour, mac,
-                                        port_node_source, bus_name, dev_name);
+                                        port_node_source);
 }
 
 static void
@@ -560,6 +925,7 @@ port_table_update_devlink_port(struct dl_port *port_entry,
     }
     port_table_update_entry(
         port_table, port_entry->bus_name, port_entry->dev_name,
+        port_entry->index,
         port_entry->netdev_ifindex, port_entry->netdev_name,
         port_entry->number, port_entry->pci_pf_number,
         port_entry->pci_vf_number, port_entry->flavour,
@@ -681,6 +1047,7 @@ devlink_monitor_run(void)
             }
         }
     }
+    port_table_expire_pending_vf_mac_programming(port_table);
     return changed;
 }
 
@@ -904,7 +1271,18 @@ vif_plug_representor_port_prepare(const struct vif_plug_port_ctx_in *ctx_in,
         }
         log_port_table_pf_entries("representor lookup failed");
         return false;
-    } else if (port_node_rename_expected(pn)) {
+    }
+
+    /* Program VF MAC before the rename check.  MAC programming uses the
+     * devlink port index (bus/dev/port_index), not the netdev name, so
+     * it is safe to issue even while a udev rename is still pending.
+     * This avoids a race where the port is claimed by OVN before the
+     * rename completes: without early programming the MAC would never
+     * be set because subsequent iterations skip already-installed
+     * ports. */
+    vif_plug_representor_program_vf_mac(ctx_in, pn, opt_pf_mac, opt_vf_num);
+
+    if (port_node_rename_expected(pn)) {
         VLOG_INFO("Lookup of representor port successful, but we anticipate "
                   "the netdev name to change, refusing plug/update of "
                   "lport: %s current netdev_name: %s",
@@ -1005,17 +1383,37 @@ compat_get_host_pf_mac(const char *netdev_name, struct eth_addr *ea)
 }
 
 static void
+reset_set_hw_addr_mock(int error)
+{
+    ovstest_set_hw_addr_error = error;
+    ovstest_set_hw_addr_calls = 0;
+    ovstest_set_hw_addr_last_bus_name = NULL;
+    ovstest_set_hw_addr_last_dev_name = NULL;
+    ovstest_set_hw_addr_last_port_index = UINT32_MAX;
+    ovstest_set_hw_addr_last_mac = eth_addr_zero;
+}
+
+static void
+reset_get_hw_addr_mock(bool found, struct eth_addr mac, int error)
+{
+    ovstest_get_hw_addr_found = found;
+    ovstest_get_hw_addr_mac = mac;
+    ovstest_get_hw_addr_error = error;
+    ovstest_get_hw_addr_calls = 0;
+}
+
+static void
 _init_store(void)
 {
     port_table = port_table_create();
 
     port_table_update_entry(
-        port_table, "pci", "0000:03:00.0", 10, "p0", 0,
+        port_table, "pci", "0000:03:00.0", 1, 10, "p0", 0,
         UINT16_MAX, UINT16_MAX, DEVLINK_PORT_FLAVOUR_PHYSICAL,
         (struct eth_addr) ETH_ADDR_C(00,53,00,00,00,00),
         PORT_NODE_SOURCE_DUMP);
     port_table_update_entry(
-        port_table, "pci", "0000:03:00.0", 100, "p0hpf", UINT32_MAX,
+        port_table, "pci", "0000:03:00.0", 2, 100, "p0hpf", UINT32_MAX,
         0, UINT16_MAX, DEVLINK_PORT_FLAVOUR_PCI_PF,
         (struct eth_addr) ETH_ADDR_C(00,53,00,00,00,42),
         PORT_NODE_SOURCE_DUMP);
@@ -1118,7 +1516,7 @@ test_port_store(struct ovs_cmdl_context *ctx OVS_UNUSED)
     _init_store();
 
     port_table_update_entry(
-        port_table, "pci", "0000:03:00.0", 1000, "pf0vf0", UINT32_MAX,
+        port_table, "pci", "0000:03:00.0", 3, 1000, "pf0vf0", UINT32_MAX,
         0, 0, DEVLINK_PORT_FLAVOUR_PCI_VF,
         (struct eth_addr) ETH_ADDR_C(00,53,00,00,10,00),
         PORT_NODE_SOURCE_RUNTIME);
@@ -1180,7 +1578,7 @@ test_port_prepare_vf(struct ovs_cmdl_context *ctx OVS_UNUSED)
     _init_store();
 
     port_table_update_entry(
-        port_table, "pci", "0000:03:00.0", 1000, "pf0vf0", UINT32_MAX,
+        port_table, "pci", "0000:03:00.0", 3, 1000, "pf0vf0", UINT32_MAX,
         0, 0, DEVLINK_PORT_FLAVOUR_PCI_VF,
         (struct eth_addr) ETH_ADDR_C(00,53,00,00,10,00),
         PORT_NODE_SOURCE_DUMP);
@@ -1196,6 +1594,72 @@ test_port_prepare_vf(struct ovs_cmdl_context *ctx OVS_UNUSED)
     ovs_assert(!strcmp(ctx_out.name, "pf0vf0"));
 
     port_prepare_ctx_destroy(&ctx_in, &ctx_out);
+    _destroy_store();
+}
+
+static void
+test_program_vf_mac_success(struct ovs_cmdl_context *ctx OVS_UNUSED)
+{
+    struct vif_plug_port_ctx_in ctx_in;
+    struct port_node *pn;
+    struct eth_addr old_mac = (struct eth_addr)ETH_ADDR_C(00,53,00,00,10,00);
+    struct eth_addr new_mac = (struct eth_addr)ETH_ADDR_C(00,53,00,00,10,be);
+
+    _init_store();
+    pn = port_table_update_entry(
+        port_table, "pci", "0000:03:00.0", 3, 1000, "pf0vf0", UINT32_MAX,
+        0, 0, DEVLINK_PORT_FLAVOUR_PCI_VF, old_mac, PORT_NODE_SOURCE_DUMP);
+    ovs_assert(pn);
+
+    memset(&ctx_in, 0, sizeof ctx_in);
+    ctx_in.lport_name = "lp-vf-mac-success";
+    smap_init(&ctx_in.lport_options);
+    smap_init(&ctx_in.iface_options);
+    smap_add(&ctx_in.lport_options, "mac", "00:53:00:00:10:be");
+
+    reset_set_hw_addr_mock(0);
+    vif_plug_representor_program_vf_mac(&ctx_in, pn, "00:53:00:00:00:42", "0");
+
+    ovs_assert(ovstest_set_hw_addr_calls == 1);
+    ovs_assert(!strcmp(ovstest_set_hw_addr_last_bus_name, "pci"));
+    ovs_assert(!strcmp(ovstest_set_hw_addr_last_dev_name, "0000:03:00.0"));
+    ovs_assert(ovstest_set_hw_addr_last_port_index == 3);
+    ovs_assert(eth_addr_equals(ovstest_set_hw_addr_last_mac, new_mac));
+    ovs_assert(eth_addr_equals(pn->mac, new_mac));
+
+    smap_destroy(&ctx_in.lport_options);
+    smap_destroy(&ctx_in.iface_options);
+    _destroy_store();
+}
+
+static void
+test_program_vf_mac_error(struct ovs_cmdl_context *ctx OVS_UNUSED)
+{
+    struct vif_plug_port_ctx_in ctx_in;
+    struct port_node *pn;
+    struct eth_addr old_mac = (struct eth_addr)ETH_ADDR_C(00,53,00,00,10,00);
+
+    _init_store();
+    pn = port_table_update_entry(
+        port_table, "pci", "0000:03:00.0", 3, 1000, "pf0vf0", UINT32_MAX,
+        0, 0, DEVLINK_PORT_FLAVOUR_PCI_VF, old_mac, PORT_NODE_SOURCE_DUMP);
+    ovs_assert(pn);
+
+    memset(&ctx_in, 0, sizeof ctx_in);
+    ctx_in.lport_name = "lp-vf-mac-error";
+    smap_init(&ctx_in.lport_options);
+    smap_init(&ctx_in.iface_options);
+    smap_add(&ctx_in.lport_options, "addresses",
+             "00:53:00:00:10:be 192.168.1.2");
+
+    reset_set_hw_addr_mock(EOPNOTSUPP);
+    vif_plug_representor_program_vf_mac(&ctx_in, pn, "00:53:00:00:00:42", "0");
+
+    ovs_assert(ovstest_set_hw_addr_calls == 1);
+    ovs_assert(eth_addr_equals(pn->mac, old_mac));
+
+    smap_destroy(&ctx_in.lport_options);
+    smap_destroy(&ctx_in.iface_options);
     _destroy_store();
 }
 
@@ -1222,6 +1686,58 @@ test_port_prepare_pf(struct ovs_cmdl_context *ctx OVS_UNUSED)
 }
 
 static void
+test_program_vf_mac_async_confirm(struct ovs_cmdl_context *ctx OVS_UNUSED)
+{
+    struct vif_plug_port_ctx_in ctx_in;
+    struct port_node *pn;
+    struct eth_addr old_mac = (struct eth_addr)ETH_ADDR_C(00,53,00,00,10,00);
+    struct eth_addr new_mac = (struct eth_addr)ETH_ADDR_C(00,53,00,00,10,be);
+    struct dl_port dl_port = {
+        .bus_name = "pci",
+        .dev_name = "0000:03:00.0",
+        .index = 3,
+        .netdev_ifindex = 1000,
+        .netdev_name = "pf0vf0",
+        .number = UINT32_MAX,
+        .pci_pf_number = 0,
+        .pci_vf_number = 0,
+        .flavour = DEVLINK_PORT_FLAVOUR_PCI_VF,
+        .function.eth_addr = (struct eth_addr)ETH_ADDR_C(00,53,00,00,10,be),
+    };
+
+    _init_store();
+    pn = port_table_update_entry(
+        port_table, "pci", "0000:03:00.0", 3, 1000, "pf0vf0", UINT32_MAX,
+        0, 0, DEVLINK_PORT_FLAVOUR_PCI_VF, old_mac, PORT_NODE_SOURCE_DUMP);
+    ovs_assert(pn);
+
+    memset(&ctx_in, 0, sizeof ctx_in);
+    ctx_in.lport_name = "lp-vf-mac-async-confirm";
+    smap_init(&ctx_in.lport_options);
+    smap_init(&ctx_in.iface_options);
+    smap_add(&ctx_in.lport_options, "addresses",
+             "00:53:00:00:10:be 192.168.1.2");
+
+    reset_set_hw_addr_mock(0);
+    vif_plug_representor_program_vf_mac(&ctx_in, pn, "00:53:00:00:00:42", "0");
+
+    ovs_assert(ovstest_set_hw_addr_calls == 1);
+    ovs_assert(pn->vf_mac_programming_pending);
+    ovs_assert(eth_addr_equals(pn->vf_mac_requested, new_mac));
+
+    port_table_update_devlink_port(&dl_port, PORT_NODE_SOURCE_RUNTIME);
+
+    pn = port_table_lookup_ifindex(port_table, 1000);
+    ovs_assert(pn);
+    ovs_assert(!pn->vf_mac_programming_pending);
+    ovs_assert(eth_addr_equals(pn->mac, new_mac));
+
+    smap_destroy(&ctx_in.lport_options);
+    smap_destroy(&ctx_in.iface_options);
+    _destroy_store();
+}
+
+static void
 test_port_prepare_missing_pf_mac(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     struct vif_plug_port_ctx_in ctx_in;
@@ -1241,6 +1757,173 @@ test_port_prepare_missing_pf_mac(struct ovs_cmdl_context *ctx OVS_UNUSED)
 }
 
 static void
+test_program_vf_mac_no_change(struct ovs_cmdl_context *ctx OVS_UNUSED)
+{
+    struct vif_plug_port_ctx_in ctx_in;
+    struct port_node *pn;
+    struct eth_addr old_mac = (struct eth_addr)ETH_ADDR_C(00,53,00,00,10,00);
+
+    _init_store();
+    pn = port_table_update_entry(
+        port_table, "pci", "0000:03:00.0", 3, 1000, "pf0vf0", UINT32_MAX,
+        0, 0, DEVLINK_PORT_FLAVOUR_PCI_VF, old_mac, PORT_NODE_SOURCE_DUMP);
+    ovs_assert(pn);
+
+    memset(&ctx_in, 0, sizeof ctx_in);
+    ctx_in.lport_name = "lp-vf-mac-no-change";
+    smap_init(&ctx_in.lport_options);
+    smap_init(&ctx_in.iface_options);
+    smap_add(&ctx_in.lport_options, "mac", "00:53:00:00:10:00");
+
+    reset_set_hw_addr_mock(0);
+    vif_plug_representor_program_vf_mac(&ctx_in, pn, "00:53:00:00:00:42", "0");
+
+    ovs_assert(ovstest_set_hw_addr_calls == 0);
+    ovs_assert(eth_addr_equals(pn->mac, old_mac));
+
+    smap_destroy(&ctx_in.lport_options);
+    smap_destroy(&ctx_in.iface_options);
+    _destroy_store();
+}
+
+static void
+test_program_vf_mac_async_mismatch_retry(
+    struct ovs_cmdl_context *ctx OVS_UNUSED)
+{
+    struct vif_plug_port_ctx_in ctx_in;
+    struct port_node *pn;
+    struct eth_addr old_mac = (struct eth_addr)ETH_ADDR_C(00,53,00,00,10,00);
+    struct eth_addr new_mac = (struct eth_addr)ETH_ADDR_C(00,53,00,00,10,be);
+    struct dl_port dl_port = {
+        .bus_name = "pci",
+        .dev_name = "0000:03:00.0",
+        .index = 3,
+        .netdev_ifindex = 1000,
+        .netdev_name = "pf0vf0",
+        .number = UINT32_MAX,
+        .pci_pf_number = 0,
+        .pci_vf_number = 0,
+        .flavour = DEVLINK_PORT_FLAVOUR_PCI_VF,
+        .function.eth_addr = (struct eth_addr)ETH_ADDR_C(00,53,00,00,10,11),
+    };
+
+    _init_store();
+    pn = port_table_update_entry(
+        port_table, "pci", "0000:03:00.0", 3, 1000, "pf0vf0", UINT32_MAX,
+        0, 0, DEVLINK_PORT_FLAVOUR_PCI_VF, old_mac, PORT_NODE_SOURCE_DUMP);
+    ovs_assert(pn);
+
+    memset(&ctx_in, 0, sizeof ctx_in);
+    ctx_in.lport_name = "lp-vf-mac-async-mismatch-retry";
+    smap_init(&ctx_in.lport_options);
+    smap_init(&ctx_in.iface_options);
+    smap_add(&ctx_in.lport_options, "addresses",
+             "00:53:00:00:10:be 192.168.1.2");
+
+    reset_set_hw_addr_mock(0);
+    vif_plug_representor_program_vf_mac(&ctx_in, pn, "00:53:00:00:00:42", "0");
+
+    ovs_assert(ovstest_set_hw_addr_calls == 1);
+    ovs_assert(pn->vf_mac_programming_pending);
+    ovs_assert(eth_addr_equals(pn->vf_mac_requested, new_mac));
+
+    port_table_update_devlink_port(&dl_port, PORT_NODE_SOURCE_RUNTIME);
+
+    pn = port_table_lookup_ifindex(port_table, 1000);
+    ovs_assert(pn);
+    ovs_assert(ovstest_set_hw_addr_calls == 2);
+    ovs_assert(eth_addr_equals(ovstest_set_hw_addr_last_mac, new_mac));
+    ovs_assert(pn->vf_mac_programming_pending);
+    ovs_assert(eth_addr_equals(pn->vf_mac_requested, new_mac));
+    ovs_assert(eth_addr_equals(pn->mac, new_mac));
+
+    smap_destroy(&ctx_in.lport_options);
+    smap_destroy(&ctx_in.iface_options);
+    _destroy_store();
+}
+
+static void
+test_program_vf_mac_expiry_validate_current(
+    struct ovs_cmdl_context *ctx OVS_UNUSED)
+{
+    struct vif_plug_port_ctx_in ctx_in;
+    struct port_node *pn;
+    struct eth_addr old_mac = (struct eth_addr)ETH_ADDR_C(00,53,00,00,10,00);
+    struct eth_addr new_mac = (struct eth_addr)ETH_ADDR_C(00,53,00,00,10,be);
+
+    _init_store();
+    pn = port_table_update_entry(
+        port_table, "pci", "0000:03:00.0", 3, 1000, "pf0vf0", UINT32_MAX,
+        0, 0, DEVLINK_PORT_FLAVOUR_PCI_VF, old_mac, PORT_NODE_SOURCE_DUMP);
+    ovs_assert(pn);
+
+    memset(&ctx_in, 0, sizeof ctx_in);
+    ctx_in.lport_name = "lp-vf-mac-expiry-validate-current";
+    smap_init(&ctx_in.lport_options);
+    smap_init(&ctx_in.iface_options);
+    smap_add(&ctx_in.lport_options, "addresses",
+             "00:53:00:00:10:be 192.168.1.2");
+
+    reset_set_hw_addr_mock(0);
+    vif_plug_representor_program_vf_mac(&ctx_in, pn, "00:53:00:00:00:42", "0");
+    ovs_assert(ovstest_set_hw_addr_calls == 1);
+    ovs_assert(pn->vf_mac_programming_pending);
+
+    reset_get_hw_addr_mock(true, new_mac, 0);
+    pn->vf_mac_requested_at = time_msec() - VF_MAC_CONFIRM_TIMEOUT_MS - 1;
+    port_table_expire_pending_vf_mac_programming(port_table);
+
+    ovs_assert(ovstest_get_hw_addr_calls == 1);
+    ovs_assert(ovstest_set_hw_addr_calls == 1);
+    ovs_assert(!pn->vf_mac_programming_pending);
+    ovs_assert(eth_addr_equals(pn->mac, new_mac));
+
+    smap_destroy(&ctx_in.lport_options);
+    smap_destroy(&ctx_in.iface_options);
+    _destroy_store();
+}
+
+static void
+test_program_vf_mac_expiry_retry(struct ovs_cmdl_context *ctx OVS_UNUSED)
+{
+    struct vif_plug_port_ctx_in ctx_in;
+    struct port_node *pn;
+    struct eth_addr old_mac = (struct eth_addr)ETH_ADDR_C(00,53,00,00,10,00);
+    struct eth_addr new_mac = (struct eth_addr)ETH_ADDR_C(00,53,00,00,10,be);
+
+    _init_store();
+    pn = port_table_update_entry(
+        port_table, "pci", "0000:03:00.0", 3, 1000, "pf0vf0", UINT32_MAX,
+        0, 0, DEVLINK_PORT_FLAVOUR_PCI_VF, old_mac, PORT_NODE_SOURCE_DUMP);
+    ovs_assert(pn);
+
+    memset(&ctx_in, 0, sizeof ctx_in);
+    ctx_in.lport_name = "lp-vf-mac-expiry-retry";
+    smap_init(&ctx_in.lport_options);
+    smap_init(&ctx_in.iface_options);
+    smap_add(&ctx_in.lport_options, "addresses",
+             "00:53:00:00:10:be 192.168.1.2");
+
+    reset_set_hw_addr_mock(0);
+    vif_plug_representor_program_vf_mac(&ctx_in, pn, "00:53:00:00:00:42", "0");
+    ovs_assert(ovstest_set_hw_addr_calls == 1);
+    ovs_assert(pn->vf_mac_programming_pending);
+
+    reset_get_hw_addr_mock(true, old_mac, 0);
+    pn->vf_mac_requested_at = time_msec() - VF_MAC_CONFIRM_TIMEOUT_MS - 1;
+    port_table_expire_pending_vf_mac_programming(port_table);
+
+    ovs_assert(ovstest_get_hw_addr_calls == 1);
+    ovs_assert(ovstest_set_hw_addr_calls == 2);
+    ovs_assert(pn->vf_mac_programming_pending);
+    ovs_assert(eth_addr_equals(pn->vf_mac_requested, new_mac));
+
+    smap_destroy(&ctx_in.lport_options);
+    smap_destroy(&ctx_in.iface_options);
+    _destroy_store();
+}
+
+static void
 test_port_prepare_missing_vf_num(struct ovs_cmdl_context *ctx OVS_UNUSED)
 {
     struct vif_plug_port_ctx_in ctx_in;
@@ -1250,7 +1933,7 @@ test_port_prepare_missing_vf_num(struct ovs_cmdl_context *ctx OVS_UNUSED)
     _init_store();
 
     port_table_update_entry(
-        port_table, "pci", "0000:03:00.0", 1001, "pf0vf1", UINT32_MAX,
+        port_table, "pci", "0000:03:00.0", 4, 1001, "pf0vf1", UINT32_MAX,
         0, 1, DEVLINK_PORT_FLAVOUR_PCI_VF,
         (struct eth_addr) ETH_ADDR_C(00,53,00,00,10,01),
         PORT_NODE_SOURCE_DUMP);
@@ -1279,7 +1962,7 @@ test_port_node_rename_expected(struct ovs_cmdl_context *ctx OVS_UNUSED)
     ovs_assert(port_node_rename_expected(pn) == false);
 
     pn = port_table_update_entry(
-            port_table, "pci", "0000:03:00.0", 1000, "eth0", UINT32_MAX,
+            port_table, "pci", "0000:03:00.0", 3, 1000, "eth0", UINT32_MAX,
             0, 0, DEVLINK_PORT_FLAVOUR_PCI_VF,
             (struct eth_addr) ETH_ADDR_C(00,53,00,00,10,00),
             PORT_NODE_SOURCE_RUNTIME);
@@ -1414,6 +2097,18 @@ test_vif_plug_representor_main(int argc, char **argv) {
          test_port_prepare_missing_pf_mac, OVS_RO},
         {"port-prepare-missing-vf-num", NULL, 0, 0,
          test_port_prepare_missing_vf_num, OVS_RO},
+        {"vf-mac-success", NULL, 0, 0, test_program_vf_mac_success, OVS_RO},
+        {"vf-mac-error", NULL, 0, 0, test_program_vf_mac_error, OVS_RO},
+        {"vf-mac-async-confirm", NULL, 0, 0,
+         test_program_vf_mac_async_confirm, OVS_RO},
+        {"vf-mac-no-change", NULL, 0, 0, test_program_vf_mac_no_change,
+         OVS_RO},
+        {"vf-mac-async-mismatch-retry", NULL, 0, 0,
+         test_program_vf_mac_async_mismatch_retry, OVS_RO},
+        {"vf-mac-expiry-validate-current", NULL, 0, 0,
+         test_program_vf_mac_expiry_validate_current, OVS_RO},
+        {"vf-mac-expiry-retry", NULL, 0, 0, test_program_vf_mac_expiry_retry,
+         OVS_RO},
         {NULL, NULL, 0, 0, NULL, OVS_RO},
     };
     struct ovs_cmdl_context ctx;

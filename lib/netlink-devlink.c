@@ -176,6 +176,9 @@ attr_get_up_to_u64(size_t attr_idx, struct nlattr *attrs[],
         case NL_A_U64:
             return nl_attr_get_u64(attrs[attr_idx]);
             break;
+        case NL_A_RTA_VIA:
+            return -1;
+            break;
         case NL_A_U128:
         case NL_A_STRING:
         case NL_A_NO_ATTR:
@@ -478,6 +481,44 @@ nl_dl_parse_info_policy(struct ofpbuf *msg, struct dl_info *info)
     }
 
     return true;
+}
+
+int
+nl_dl_port_function_set_hw_addr(const char *bus_name, const char *dev_name,
+                                uint32_t port_index,
+                                const struct eth_addr *hw_addr)
+{
+    struct ofpbuf request;
+    struct ofpbuf *reply = NULL;
+    size_t fn_offset;
+    int error;
+
+    error = nl_devlink_init();
+    if (error) {
+        return error;
+    }
+
+    ofpbuf_init(&request, 0);
+    nl_msg_put_dlgenmsg(&request, 0, ovs_devlink_family, DEVLINK_CMD_PORT_SET,
+                        NLM_F_REQUEST | NLM_F_ACK);
+    nl_msg_put_string(&request, DEVLINK_ATTR_BUS_NAME, bus_name);
+    nl_msg_put_string(&request, DEVLINK_ATTR_DEV_NAME, dev_name);
+    nl_msg_put_u32(&request, DEVLINK_ATTR_PORT_INDEX, port_index);
+
+    fn_offset = nl_msg_start_nested_with_flag(&request,
+                                              DEVLINK_ATTR_PORT_FUNCTION);
+    nl_msg_put_unspec(&request, DEVLINK_PORT_FUNCTION_ATTR_HW_ADDR,
+                      hw_addr, sizeof *hw_addr);
+    nl_msg_end_nested(&request, fn_offset);
+
+    error = nl_transact(NETLINK_GENERIC, &request, &reply);
+
+    ofpbuf_uninit(&request);
+    if (reply) {
+        ofpbuf_delete(reply);
+    }
+
+    return error;
 }
 
 static int
