@@ -111,5 +111,9 @@ bool nl_dl_parse_port_policy(struct ofpbuf *, struct dl_port *);
 bool nl_dl_parse_port_function(struct nlattr *, struct dl_port_function *);
 bool nl_dl_parse_info_policy(struct ofpbuf *, struct dl_info *);
 bool nl_dl_parse_info_version(struct nlattr *, struct dl_info_version *);
+int nl_dl_port_function_set_hw_addr(const char *bus_name,
+                                    const char *dev_name,
+                                    uint32_t port_index,
+                                    const struct eth_addr *hw_addr);
 
 #endif /* NETLINK_DEVLINK_H */

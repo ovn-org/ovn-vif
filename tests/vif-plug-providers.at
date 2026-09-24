@@ -32,3 +32,15 @@ AT_CHECK([ovstest test-vif-plug-representor port-prepare-missing-vf-num],
          [0], [])
 
 AT_CLEANUP
+
+AT_SETUP([representor VF MAC programming])
+AT_CHECK([ovstest test-vif-plug-representor vf-mac-success], [0], [])
+AT_CHECK([ovstest test-vif-plug-representor vf-mac-error], [0], [])
+AT_CHECK([ovstest test-vif-plug-representor vf-mac-async-confirm], [0], [])
+AT_CHECK([ovstest test-vif-plug-representor vf-mac-no-change], [0], [])
+AT_CHECK([ovstest test-vif-plug-representor vf-mac-async-mismatch-retry],
+         [0], [])
+AT_CHECK([ovstest test-vif-plug-representor vf-mac-expiry-validate-current],
+         [0], [])
+AT_CHECK([ovstest test-vif-plug-representor vf-mac-expiry-retry], [0], [])
+AT_CLEANUP
