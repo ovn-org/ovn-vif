@@ -73,3 +73,9 @@ A controller may ask to unplug an interface that sits on another bridge.  The
 provider declines the request, and the controller may log that it was
 declined.  Controllers that manage the same bridge look the same to the
 provider.
+
+At DEBUG level, the ``vif_plug_representor`` logging module reports the
+bridge, interface, logical port, and reason for each declined request.  Nothing
+is logged at INFO level for approved or declined removals.  A missing interface
+on the requested bridge may belong to another bridge or may no longer exist.
+The provider does not search other bridges to tell the two apart.

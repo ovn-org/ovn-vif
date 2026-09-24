@@ -34,6 +34,8 @@ AT_CHECK([ovstest test-vif-plug-representor port-prepare-remove empty-lport],
 AT_CLEANUP
 
 AT_SETUP([representor unplug interface ownership markers])
+dnl Defensive provider-boundary checks.  The current controller already
+dnl supplies matching markers, unlike the bridge-membership regression above.
 AT_CHECK([ovstest test-vif-plug-representor port-prepare-remove wrong-lport],
          [0], [])
 AT_CHECK([
@@ -44,6 +46,53 @@ AT_CHECK([ovstest test-vif-plug-representor port-prepare-remove unmanaged],
 AT_CHECK([
     ovstest test-vif-plug-representor port-prepare-remove other-provider],
     [0], [])
+AT_CLEANUP
+
+AT_SETUP([representor unplug debug diagnostics])
+for removal_case in pf vf foreign-bridge empty-bridge unknown-interface \
+                    no-bridge no-interface empty-interface no-lport \
+                    empty-lport wrong-lport missing-iface-id unmanaged \
+                    other-provider; do
+    echo "removal case: $removal_case"
+    # Explicitly enable INFO logging, which ovstest normally disables.
+    AT_CHECK([ovstest test-vif-plug-representor port-prepare-remove \
+        $removal_case info], [0], [])
+    AT_CHECK([ovstest test-vif-plug-representor port-prepare-remove \
+        $removal_case dbg 2>unplug.log], [0], [])
+    case $removal_case in
+        pf|vf)
+            AT_CHECK([test ! -s unplug.log])
+            continue
+            ;;
+        foreign-bridge|empty-bridge|unknown-interface)
+            reason="interface not on integration bridge"
+            ;;
+        no-bridge|no-interface|empty-interface|no-lport|empty-lport)
+            reason="incomplete context"
+            ;;
+        wrong-lport|missing-iface-id)
+            reason="iface-id mismatch"
+            ;;
+        unmanaged|other-provider)
+            reason="ovn-plugged mismatch"
+            ;;
+    esac
+    # Each fixture calls prepare twice to verify stateless handling.
+    AT_CHECK([grep -c '^DBG|Declining representor unplug: ' unplug.log],
+             [0], [2
+])
+    AT_CHECK([grep -c "reason=$reason$" unplug.log], [0], [2
+])
+    if test "$removal_case" = foreign-bridge; then
+        AT_CHECK([grep -c 'bridge=br-bgp iface=pf0hpf lport=lp-pf ' \
+            unplug.log], [0], [2
+])
+    elif test "$removal_case" = no-bridge; then
+        AT_CHECK([grep -c 'bridge=(none) iface=pf0hpf lport=lp-pf ' \
+            unplug.log], [0], [2
+])
+    fi
+done
 AT_CLEANUP
 
 AT_SETUP([representor data store devlink interface])

@@ -1212,9 +1212,12 @@ vif_plug_representor_destroy(void)
 static bool
 vif_plug_representor_can_unplug(const struct vif_plug_port_ctx_in *ctx_in)
 {
+    const char *reason = "interface not on integration bridge";
+
     if (!ctx_in->br_int || !ctx_in->iface_name || !ctx_in->iface_name[0]
         || !ctx_in->lport_name || !ctx_in->lport_name[0]) {
-        return false;
+        reason = "incomplete context";
+        goto decline;
     }
 
     /* Multiple controllers can share OVSDB while managing different bridges.
@@ -1229,15 +1232,32 @@ vif_plug_representor_can_unplug(const struct vif_plug_port_ctx_in *ctx_in)
         for (size_t j = 0; j < port->n_interfaces; j++) {
             const struct ovsrec_interface *iface = port->interfaces[j];
 
-            if (!strcmp(iface->name, ctx_in->iface_name)
-                && !strcmp(smap_get_def(&iface->external_ids, "iface-id", ""),
-                           ctx_in->lport_name)
-                && !strcmp(smap_get_def(&iface->external_ids, "ovn-plugged",
-                                       ""), vif_plug_representor.type)) {
-                return true;
+            if (strcmp(iface->name, ctx_in->iface_name)) {
+                continue;
             }
+
+            /* The current controller already ensures these markers match.
+             * Retain the checks as defensive provider-boundary validation. */
+            const char *iface_id = smap_get(&iface->external_ids, "iface-id");
+            if (!iface_id || strcmp(iface_id, ctx_in->lport_name)) {
+                reason = "iface-id mismatch";
+                goto decline;
+            }
+            const char *provider = smap_get(&iface->external_ids,
+                                            "ovn-plugged");
+            if (!provider || strcmp(provider, vif_plug_representor.type)) {
+                reason = "ovn-plugged mismatch";
+                goto decline;
+            }
+            return true;
         }
     }
+
+decline:
+    VLOG_DBG("Declining representor unplug: bridge=%s iface=%s lport=%s "
+             "reason=%s", ctx_in->br_int ? ctx_in->br_int->name : "(none)",
+             ctx_in->iface_name ? ctx_in->iface_name : "(none)",
+             ctx_in->lport_name ? ctx_in->lport_name : "(none)", reason);
     return false;
 }
 
@@ -1408,6 +1428,18 @@ compat_get_host_pf_mac(const char *netdev_name, struct eth_addr *ea)
 #ifdef OVSTEST
 #include "tests/ovstest.h"
 
+static void
+test_enable_logging(const char *level_name)
+{
+    enum vlog_level level = vlog_get_level_val(level_name);
+
+    ovs_assert(level < VLL_N_LEVELS);
+    /* ovstest disables console logging.  Explicitly re-enable this module
+     * with deterministic formatting when testing log levels and messages. */
+    vlog_set_pattern(VLF_CONSOLE, "%p|%m");
+    vlog_set_levels(&this_module, VLF_CONSOLE, level);
+}
+
 static bool
 compat_get_host_pf_mac(const char *netdev_name, struct eth_addr *ea)
 {
@@ -1488,6 +1520,10 @@ port_prepare_ctx_destroy(struct vif_plug_port_ctx_in *ctx_in,
 static void
 test_port_prepare_remove(struct ovs_cmdl_context *ctx)
 {
+    if (ctx->argc > 2) {
+        test_enable_logging(ctx->argv[2]);
+    }
+
     struct ovsrec_interface ifaces[] = {
         { .name = "internal0" },
         { .name = "pf0hpf" },
@@ -2235,7 +2271,7 @@ test_vif_plug_representor_main(int argc, char **argv) {
          test_port_prepare_missing_pf_mac, OVS_RO},
         {"port-prepare-missing-vf-num", NULL, 0, 0,
          test_port_prepare_missing_vf_num, OVS_RO},
-        {"port-prepare-remove", "CASE", 1, 1,
+        {"port-prepare-remove", "CASE [LOG_LEVEL]", 1, 2,
          test_port_prepare_remove, OVS_RO},
         {"vf-mac-success", NULL, 0, 0, test_program_vf_mac_success, OVS_RO},
         {"vf-mac-error", NULL, 0, 0, test_program_vf_mac_error, OVS_RO},
