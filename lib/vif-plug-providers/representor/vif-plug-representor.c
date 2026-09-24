@@ -26,6 +26,7 @@
 #include "vif-plug-provider.h"
 
 #include "hash.h"
+#include "lib/vswitch-idl.h"
 #include "openvswitch/hmap.h"
 #include "openvswitch/vlog.h"
 #include "netlink.h"
@@ -106,6 +107,8 @@ struct port_table {
 };
 
 static struct port_table *port_table;
+
+extern const struct vif_plug_class vif_plug_representor;
 static void
 log_port_table_pf_entries(const char *tag)
 {
@@ -451,9 +454,9 @@ vif_plug_representor_program_vf_mac(
     }
 
     if (pn->flavour != DEVLINK_PORT_FLAVOUR_PCI_VF) {
-        VLOG_INFO("Skipping VF MAC programming for non-VF representor "
-                  "lport: %s pf-mac: '%s' vf-num: '%s' mac: '%s'",
-                  ctx_in->lport_name, opt_pf_mac, opt_vf_num, opt_lport_mac);
+        VLOG_DBG("Skipping VF MAC programming for non-VF representor "
+                 "lport: %s pf-mac: '%s' vf-num: '%s' mac: '%s'",
+                 ctx_in->lport_name, opt_pf_mac, opt_vf_num, opt_lport_mac);
         return;
     }
 
@@ -1207,11 +1210,43 @@ vif_plug_representor_destroy(void)
 }
 
 static bool
+vif_plug_representor_can_unplug(const struct vif_plug_port_ctx_in *ctx_in)
+{
+    if (!ctx_in->br_int || !ctx_in->iface_name || !ctx_in->iface_name[0]
+        || !ctx_in->lport_name || !ctx_in->lport_name[0]) {
+        return false;
+    }
+
+    /* Multiple controllers can share OVSDB while managing different bridges.
+     * ovn-plugged identifies the provider, not the owning controller.  Only
+     * allow removal from this controller's integration bridge, using the
+     * existing markers so ports survive controller restarts and upgrades.
+     * Do not require a Port_Binding or devlink entry: either can already be
+     * gone when a stale interface needs to be removed. */
+    for (size_t i = 0; i < ctx_in->br_int->n_ports; i++) {
+        const struct ovsrec_port *port = ctx_in->br_int->ports[i];
+
+        for (size_t j = 0; j < port->n_interfaces; j++) {
+            const struct ovsrec_interface *iface = port->interfaces[j];
+
+            if (!strcmp(iface->name, ctx_in->iface_name)
+                && !strcmp(smap_get_def(&iface->external_ids, "iface-id", ""),
+                           ctx_in->lport_name)
+                && !strcmp(smap_get_def(&iface->external_ids, "ovn-plugged",
+                                       ""), vif_plug_representor.type)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool
 vif_plug_representor_port_prepare(const struct vif_plug_port_ctx_in *ctx_in,
                                  struct vif_plug_port_ctx_out *ctx_out)
 {
     if (ctx_in->op_type == PLUG_OP_REMOVE) {
-        return true;
+        return vif_plug_representor_can_unplug(ctx_in);
     }
     const char *opt_pf_mac = smap_get(&ctx_in->lport_options,
                                    "vif-plug:representor:pf-mac");
@@ -1448,6 +1483,109 @@ port_prepare_ctx_destroy(struct vif_plug_port_ctx_in *ctx_in,
     smap_destroy(&ctx_in->lport_options);
     smap_destroy(&ctx_in->iface_options);
     smap_destroy(&ctx_out->iface_options);
+}
+
+static void
+test_port_prepare_remove(struct ovs_cmdl_context *ctx)
+{
+    struct ovsrec_interface ifaces[] = {
+        { .name = "internal0" },
+        { .name = "pf0hpf" },
+        { .name = "pf0vf0" },
+        { .name = "missing-iface-id" },
+        { .name = "unmanaged" },
+        { .name = "other-provider" },
+    };
+    const char *lport_names[] = {
+        "lp-internal", "lp-pf", "lp-vf", NULL, "lp-unmanaged", "lp-other",
+    };
+    for (size_t i = 0; i < ARRAY_SIZE(ifaces); i++) {
+        smap_init(&ifaces[i].external_ids);
+        if (lport_names[i]) {
+            smap_add(&ifaces[i].external_ids, "iface-id", lport_names[i]);
+        }
+        if (i != 4) {
+            smap_add(&ifaces[i].external_ids, "ovn-plugged",
+                     i == 5 ? "another-provider" : "representor");
+        }
+    }
+    struct ovsrec_interface *internal_ifaces[] = { &ifaces[0] };
+    struct ovsrec_interface *representors[] = {
+        &ifaces[1], &ifaces[2], &ifaces[3], &ifaces[4], &ifaces[5],
+    };
+    struct ovsrec_port internal_port = {
+        .name = "internal0",
+        .interfaces = internal_ifaces,
+        .n_interfaces = ARRAY_SIZE(internal_ifaces),
+    };
+    struct ovsrec_port representor_port = {
+        /* Interface membership must not depend on the Port name. */
+        .name = "representors",
+        .interfaces = representors,
+        .n_interfaces = ARRAY_SIZE(representors),
+    };
+    struct ovsrec_port *ports[] = { &internal_port, &representor_port };
+    struct ovsrec_bridge owner = {
+        .name = "custom-integration-bridge",
+        .ports = ports,
+        .n_ports = ARRAY_SIZE(ports),
+    };
+    struct ovsrec_port *foreign_ports[] = { &internal_port };
+    struct ovsrec_bridge foreign = {
+        .name = "br-bgp",
+        .ports = foreign_ports,
+        .n_ports = ARRAY_SIZE(foreign_ports),
+    };
+    struct ovsrec_bridge empty = { .name = "empty-bridge" };
+    const struct {
+        const char *name;
+        const struct ovsrec_bridge *bridge;
+        const char *iface_name;
+        const char *lport_name;
+        bool allowed;
+    } cases[] = {
+        { "pf", &owner, "pf0hpf", "lp-pf", true },
+        { "vf", &owner, "pf0vf0", "lp-vf", true },
+        { "foreign-bridge", &foreign, "pf0hpf", "lp-pf", false },
+        { "empty-bridge", &empty, "pf0hpf", "lp-pf", false },
+        { "no-bridge", NULL, "pf0hpf", "lp-pf", false },
+        { "no-interface", &owner, NULL, "lp-pf", false },
+        { "empty-interface", &owner, "", "lp-pf", false },
+        { "unknown-interface", &owner, "pf0vf99", "lp-vf99", false },
+        { "no-lport", &owner, "pf0hpf", NULL, false },
+        { "empty-lport", &owner, "pf0hpf", "", false },
+        { "wrong-lport", &owner, "pf0hpf", "stale-lport", false },
+        { "missing-iface-id", &owner, "missing-iface-id", "lp-pf", false },
+        { "unmanaged", &owner, "unmanaged", "lp-unmanaged", false },
+        { "other-provider", &owner, "other-provider", "lp-other", false },
+    };
+    bool found = false;
+    for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+        if (strcmp(ctx->argv[1], cases[i].name)) {
+            continue;
+        }
+        struct vif_plug_port_ctx_in ctx_in;
+        struct vif_plug_port_ctx_out ctx_out;
+        port_prepare_ctx_init(&ctx_in, &ctx_out, cases[i].lport_name);
+        ctx_in.op_type = PLUG_OP_REMOVE;
+        ctx_in.br_int = cases[i].bridge;
+        ctx_in.iface_name = cases[i].iface_name;
+
+        /* No in-memory ownership, hardware inventory, or SB options.  This
+         * also covers cleanup after restart or after the binding is gone. */
+        ovs_assert(!port_table);
+        ovs_assert(vif_plug_representor_port_prepare(&ctx_in, NULL)
+                   == cases[i].allowed);
+        ovs_assert(vif_plug_representor_port_prepare(&ctx_in, NULL)
+                   == cases[i].allowed);
+        port_prepare_ctx_destroy(&ctx_in, &ctx_out);
+        found = true;
+        break;
+    }
+    ovs_assert(found);
+    for (size_t i = 0; i < ARRAY_SIZE(ifaces); i++) {
+        smap_destroy(&ifaces[i].external_ids);
+    }
 }
 
 static void
@@ -2097,6 +2235,8 @@ test_vif_plug_representor_main(int argc, char **argv) {
          test_port_prepare_missing_pf_mac, OVS_RO},
         {"port-prepare-missing-vf-num", NULL, 0, 0,
          test_port_prepare_missing_vf_num, OVS_RO},
+        {"port-prepare-remove", "CASE", 1, 1,
+         test_port_prepare_remove, OVS_RO},
         {"vf-mac-success", NULL, 0, 0, test_program_vf_mac_success, OVS_RO},
         {"vf-mac-error", NULL, 0, 0, test_program_vf_mac_error, OVS_RO},
         {"vf-mac-async-confirm", NULL, 0, 0,

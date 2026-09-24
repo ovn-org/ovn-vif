@@ -6,6 +6,46 @@ AT_CHECK([ovstest test-vif-plug-representor store-port], [0], [])
 AT_CHECK([ovstest test-vif-plug-representor store-rename-expected], [0], [])
 AT_CLEANUP
 
+AT_SETUP([representor unplug bridge ownership])
+AT_CHECK([ovstest test-vif-plug-representor port-prepare-remove pf], [0], [])
+AT_CHECK([ovstest test-vif-plug-representor port-prepare-remove vf], [0], [])
+AT_CHECK([
+    ovstest test-vif-plug-representor port-prepare-remove foreign-bridge],
+    [0], [])
+AT_CHECK([ovstest test-vif-plug-representor port-prepare-remove empty-bridge],
+         [0], [])
+AT_CHECK([
+    ovstest test-vif-plug-representor port-prepare-remove unknown-interface],
+    [0], [])
+AT_CLEANUP
+
+AT_SETUP([representor unplug incomplete context])
+AT_CHECK([ovstest test-vif-plug-representor port-prepare-remove no-bridge],
+         [0], [])
+AT_CHECK([ovstest test-vif-plug-representor port-prepare-remove no-interface],
+         [0], [])
+AT_CHECK([
+    ovstest test-vif-plug-representor port-prepare-remove empty-interface],
+    [0], [])
+AT_CHECK([ovstest test-vif-plug-representor port-prepare-remove no-lport],
+         [0], [])
+AT_CHECK([ovstest test-vif-plug-representor port-prepare-remove empty-lport],
+         [0], [])
+AT_CLEANUP
+
+AT_SETUP([representor unplug interface ownership markers])
+AT_CHECK([ovstest test-vif-plug-representor port-prepare-remove wrong-lport],
+         [0], [])
+AT_CHECK([
+    ovstest test-vif-plug-representor port-prepare-remove missing-iface-id],
+    [0], [])
+AT_CHECK([ovstest test-vif-plug-representor port-prepare-remove unmanaged],
+         [0], [])
+AT_CHECK([
+    ovstest test-vif-plug-representor port-prepare-remove other-provider],
+    [0], [])
+AT_CLEANUP
+
 AT_SETUP([representor data store devlink interface])
 AT_CHECK([
     ovstest test-vif-plug-representor store-devlink-port-update], [0], [])
