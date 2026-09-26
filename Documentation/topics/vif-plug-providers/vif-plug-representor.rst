@@ -53,3 +53,29 @@ operator to ensure an appropriate MAC programming method is in place. This
 allows existing systems to keep working until kernel and/or firmware upgrades
 add support, while platforms that do not support VF MAC programming continue to
 use the graceful fallback.
+
+Unplug Ownership
+----------------
+
+When multiple OVN controllers share an OVS database, the provider only approves
+unplugging an interface that belongs to the requesting controller's configured
+integration bridge.  The interface's existing ``iface-id`` must match the
+logical port, and ``ovn-plugged`` must identify the ``representor`` provider.
+An interface on another bridge, or a request with incomplete removal context,
+is left untouched.
+
+Removal does not require that the running controller plugged the interface, or
+that its hardware has been discovered.  Existing representor ports can still be
+cleaned up after a controller restart or after the logical port has been
+deleted.
+
+A controller may ask to unplug an interface that sits on another bridge.  The
+provider declines the request, and the controller may log that it was
+declined.  Controllers that manage the same bridge look the same to the
+provider.
+
+At DEBUG level, the ``vif_plug_representor`` logging module reports the
+bridge, interface, logical port, and reason for each declined request.  Nothing
+is logged at INFO level for approved or declined removals.  A missing interface
+on the requested bridge may belong to another bridge or may no longer exist.
+The provider does not search other bridges to tell the two apart.
