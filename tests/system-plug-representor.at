@@ -98,6 +98,91 @@ OVS_TRAFFIC_VSWITCHD_STOP(["/failed to query port patch-.*/d
 
 AT_CLEANUP
 
+AT_SETUP([Unplug requests from a second controller])
+
+ovn_start
+OVS_TRAFFIC_VSWITCHD_START()
+ADD_BR([br-int])
+ADD_BR([br-int2])
+# Two controllers share this OVSDB.  hv1 uses br-int and hv2 uses br-int2.
+ovs-vsctl \
+        -- set Open_vSwitch . external-ids:system-id=hv1 \
+        -- set Open_vSwitch . external-ids:ovn-remote=unix:$ovs_base/ovn-sb/ovn-sb.sock \
+        -- set Open_vSwitch . external-ids:ovn-encap-type=geneve \
+        -- set Open_vSwitch . external-ids:ovn-encap-ip=169.0.0.1 \
+        -- set Open_vSwitch . external-ids:ovn-bridge-hv2=br-int2 \
+        -- set Open_vSwitch . external-ids:ovn-encap-ip-hv2=169.0.0.2 \
+        -- set Open_vSwitch . external-ids:ovn-monitor-all=true \
+        -- set bridge br-int fail-mode=secure other-config:disable-in-band=true \
+        -- set bridge br-int2 fail-mode=secure other-config:disable-in-band=true
+
+# The logical port is bound to hv1 but no longer asks for plugging, so hv1
+# leaves its interface alone while the binding exists.
+check ovn-nbctl ls-add foo
+check ovn-nbctl lsp-add foo foo1 \
+    -- lsp-set-addresses foo1 "f0:00:00:01:02:03 192.168.1.2" \
+    -- lsp-set-options foo1 requested-chassis=hv1
+
+# A representor that an earlier hv1 plugged into br-int.  Only the Interface
+# row and its markers remain, as after a controller restart.
+check ovs-vsctl add-port br-int pf0vf0 \
+    -- set Interface pf0vf0 type=internal \
+        external_ids:iface-id=foo1 external_ids:ovn-plugged=representor
+
+start_daemon ovn-controller
+ovn-controller -n hv2 -vconsole:off -vvif_plug_representor:file:dbg \
+    --detach --no-chdir \
+    --pidfile=$OVS_RUNDIR/ovn-controller-hv2.pid \
+    --unixctl=$OVS_RUNDIR/ovn-controller-hv2.ctl \
+    --log-file=$ovs_base/ovn-controller-hv2.log
+on_exit 'test -e $OVS_RUNDIR/ovn-controller-hv2.pid \
+    && kill $(cat $OVS_RUNDIR/ovn-controller-hv2.pid)'
+
+_current_ovs_ctl_timeout=$OVS_CTL_TIMEOUT
+export OVS_CTL_TIMEOUT=60
+
+# hv2 sees the same Interface rows and asks the provider to unplug the
+# representor on br-int.  The provider declines and the port stays.
+OVS_WAIT_UNTIL([grep -q 'Not unplugging iface pf0vf0 (iface-id foo1)' \
+                ovn-controller-hv2.log])
+OVS_WAIT_UNTIL([grep 'Declining representor unplug: bridge=br-int2 ' \
+                ovn-controller-hv2.log | grep 'iface=pf0vf0 lport=foo1 ' \
+                | grep -q 'reason=interface not on integration bridge'])
+AT_CHECK([ovs-vsctl iface-to-br pf0vf0], [0], [br-int
+])
+AT_CHECK([grep -c 'Not unplugging iface' ovn-controller.log], [1], [0
+])
+
+# Once the logical port is gone, hv1 owns the interface and removes it.
+check ovn-nbctl --wait=sb lsp-del foo1
+OVS_WAIT_UNTIL([grep 'Unplugging port pf0vf0 from br-int' ovn-controller.log \
+                | grep -q 'for iface-id foo1'])
+OVS_WAIT_UNTIL([test -z "$(ovs-vsctl --bare --columns=name find Interface \
+                              name=pf0vf0)"])
+AT_CHECK([grep -c 'Unplugging port' ovn-controller-hv2.log], [1], [0
+])
+export OVS_CTL_TIMEOUT=$_current_ovs_ctl_timeout
+
+OVS_APP_EXIT_AND_WAIT_BY_TARGET([$OVS_RUNDIR/ovn-controller-hv2.ctl],
+                                [$OVS_RUNDIR/ovn-controller-hv2.pid])
+OVS_APP_EXIT_AND_WAIT([ovn-controller])
+
+as ovn-sb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as ovn-nb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as northd
+OVS_APP_EXIT_AND_WAIT([ovn-northd])
+
+as
+OVS_TRAFFIC_VSWITCHD_STOP(["/failed to query port patch-.*/d
+/connection dropped.*/d
+/cannot get.*STP.*/d"])
+
+AT_CLEANUP
+
 # We currently skip this test due to the netdevsim driver not currently
 # properly simulating the association between PF and VF representors.
 AT_SETUP([Runtime update of lookup tables - compat mode])
